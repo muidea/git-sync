@@ -1,0 +1,18 @@
+# Build artifacts & test outputs
+/bin/
+/git-backup
+*.exe
+*.test
+*.out
+coverage.txt
+
+# Local runtime configs & secrets
+config.yaml
+*.local.yaml
+secret.env
+.env
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/

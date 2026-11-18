@@ -1,0 +1,55 @@
+storage:
+  root_dir: "/data/github-backups"
+  trash_retention_days: 30
+  gc_interval_syncs: 25
+  min_free_disk_percent: 10
+  min_free_disk_gb: 20
+
+auth:
+  mode: "pat"                   # pat | github_app
+  token_env: "GITHUB_BACKUP_TOKEN"
+  # app_id: 123456
+  # installation_id: 78901234
+  # private_key_path: "/etc/git-backup/app-private-key.pem"
+
+defaults:
+  enable_lfs: "auto"            # true | false | auto
+  mirror_pr_refs: true
+  clone_timeout: "1h"
+  update_timeout: "15m"
+  unmanaged_policy: "retain"    # retain | archive
+
+targets:
+  - repo: "muidea/clawStation"
+    enable_lfs: true
+    update_timeout: "30m"
+  - repo: "muidea/fedquery-engine"
+  - repo: "muidea/billing-core"
+    skip_unchanged: false
+  - repo: "torvalds/linux"
+    clone_timeout: "4h"
+    update_timeout: "45m"
+    mirror_pr_refs: false
+
+sync:
+  concurrency: 6
+  skip_unchanged: true
+  force_full_sync_days: 7
+  max_retries: 3
+
+network:
+  proxy_url: ""
+
+safety:
+  max_missing_alert_ratio: 0.30
+
+observability:
+  log_format: "json"            # json | text
+  log_level: "info"             # debug | info | warn | error
+  prometheus_textfile_path: "/var/lib/node_exporter/textfile_collector/git_backup.prom"
+  alert:
+    webhook_type: "feishu"      # feishu | wecom | dingtalk | slack | generic
+    webhook_url_env: "BACKUP_ALERT_WEBHOOK"
+    webhook_secret_env: ""
+    failure_threshold: 2
+    alert_cooldown: "24h"

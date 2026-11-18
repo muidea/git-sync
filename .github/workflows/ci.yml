@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test-and-build:
+    name: Vet, Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check Git & Install Git LFS
+        run: |
+          git --version
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs version
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Go Test (race)
+        run: go test -count=1 -v -race ./...
+
+      - name: Build Binary
+        run: go build -ldflags="-s -w" -o ./bin/git-backup ./cmd/git-backup

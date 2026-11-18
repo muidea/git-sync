@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Tests
+        run: go test -count=1 -race ./...
+
+      - name: Build Cross-Platform Archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+
+          platforms=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+          )
+
+          for plat in "${platforms[@]}"; do
+            GOOS="${plat%/*}"
+            GOARCH="${plat#*/}"
+            STAGE="dist/git-backup_${VERSION}_${GOOS}_${GOARCH}"
+            mkdir -p "${STAGE}"
+
+            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
+              go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "${STAGE}/git-backup" ./cmd/git-backup
+
+            cp README.md LICENSE "${STAGE}/"
+            cp -r configs deploy "${STAGE}/"
+
+            tar -C dist -czf "dist/git-backup_${VERSION}_${GOOS}_${GOARCH}.tar.gz" "git-backup_${VERSION}_${GOOS}_${GOARCH}"
+            rm -rf "${STAGE}"
+          done
+
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
