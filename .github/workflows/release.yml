@@ -50,7 +50,7 @@ jobs:
               -o "${STAGE}/git-backup" ./cmd/git-backup
 
             cp README.md LICENSE "${STAGE}/"
-            cp -r configs deploy "${STAGE}/"
+            cp -r configs deploy scripts "${STAGE}/"
 
             tar -C dist -czf "dist/git-backup_${VERSION}_${GOOS}_${GOARCH}.tar.gz" "git-backup_${VERSION}_${GOOS}_${GOARCH}"
             rm -rf "${STAGE}"

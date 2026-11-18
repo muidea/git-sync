@@ -28,19 +28,33 @@
 
 ## 安装指南
 
-### 方式一：下载预编译二进制（推荐）
-
-从 [GitHub Releases](https://github.com/muidea/git-sync/releases) 下载对应架构的压缩包并安装：
+### 方式一：一键脚本安装（默认安装最新版本，推荐）
 
 ```bash
-VERSION="2.0.0"
-curl -fsSLO "https://github.com/muidea/git-sync/releases/download/v${VERSION}/git-backup_${VERSION}_linux_amd64.tar.gz"
+curl -fsSL https://raw.githubusercontent.com/muidea/git-sync/master/scripts/install.sh | bash
+```
+
+如需指定历史版本或自定义安装目录：
+
+```bash
+VERSION="0.0.1" INSTALL_DIR="/usr/local/bin" \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/muidea/git-sync/master/scripts/install.sh)"
+```
+
+### 方式二：手动下载预编译包（默认拉取最新 Release）
+
+从 [GitHub Releases](https://github.com/muidea/git-sync/releases) 获取最新版本号并安装（按需替换 `linux_amd64` 为 `linux_arm64` / `darwin_amd64` / `darwin_arm64`）：
+
+```bash
+TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/muidea/git-sync/releases/latest | awk -F/ '{print $NF}')
+VERSION="${TAG#v}"
+curl -fsSLO "https://github.com/muidea/git-sync/releases/download/${TAG}/git-backup_${VERSION}_linux_amd64.tar.gz"
 tar -xzf "git-backup_${VERSION}_linux_amd64.tar.gz"
 sudo install -m 0755 "git-backup_${VERSION}_linux_amd64/git-backup" /usr/local/bin/git-backup
 git-backup version
 ```
 
-### 方式二：从源码编译
+### 方式三：从源码编译
 
 ```bash
 git clone git@github.com:muidea/git-sync.git
