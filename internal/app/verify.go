@@ -134,7 +134,7 @@ func RunVerify(ctx context.Context, cfg *config.Config, opts VerifyOptions, out 
 					}
 					continue
 				}
-				env := auth.GitEnv(os.Environ(), tok, cfg.Network.ProxyURL)
+				env := auth.GitEnv(os.Environ(), tok, cfg.Network)
 				jobCtx, cancel := context.WithTimeout(ctx, job.target.UpdateTimeout)
 				res := gitops.VerifyRefs(jobCtx, job.repoDir, job.target.Repo, job.cloneURL, job.target.MirrorPRRefs, opts.RunFsck, env)
 				cancel()

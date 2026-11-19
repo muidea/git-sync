@@ -143,7 +143,10 @@ type SyncConfig struct {
 }
 
 type NetworkConfig struct {
-	ProxyURL string `yaml:"proxy_url"`
+	ProxyURL      string `yaml:"proxy_url"`
+	HTTPVersion   string `yaml:"http_version"`
+	LowSpeedLimit int    `yaml:"low_speed_limit"`
+	LowSpeedTime  int    `yaml:"low_speed_time"`
 }
 
 type SafetyConfig struct {
@@ -260,6 +263,11 @@ func defaultConfig() *Config {
 			ForceFullSyncDays: 7,
 			MaxRetries:        3,
 		},
+		Network: NetworkConfig{
+			HTTPVersion:   "HTTP/1.1",
+			LowSpeedLimit: 1000,
+			LowSpeedTime:  60,
+		},
 		Safety: SafetyConfig{
 			MaxMissingAlertRatio: 0.30,
 		},
@@ -354,6 +362,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Sync.MaxRetries < 0 {
 		return errors.New("sync.max_retries must be >= 0")
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(c.Network.HTTPVersion)) {
+	case "", "AUTO":
+		c.Network.HTTPVersion = ""
+	case "HTTP/1.1":
+		c.Network.HTTPVersion = "HTTP/1.1"
+	case "HTTP/2":
+		c.Network.HTTPVersion = "HTTP/2"
+	default:
+		return fmt.Errorf("invalid network.http_version %q: expected HTTP/1.1, HTTP/2, or auto", c.Network.HTTPVersion)
+	}
+	if c.Network.LowSpeedLimit < 0 || c.Network.LowSpeedTime < 0 {
+		return errors.New("network.low_speed_limit and network.low_speed_time must be >= 0")
 	}
 
 	if c.Safety.MaxMissingAlertRatio <= 0 || c.Safety.MaxMissingAlertRatio > 1 {

@@ -652,7 +652,7 @@ func executeSyncTask(
 			lastErr = err
 			break
 		}
-		env := auth.GitEnv(os.Environ(), tok, cfg.Network.ProxyURL)
+		env := auth.GitEnv(os.Environ(), tok, cfg.Network)
 		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 
 		if task.isNewClone {

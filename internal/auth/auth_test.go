@@ -32,10 +32,19 @@ func TestGitEnvAndRedactor(t *testing.T) {
 		t.Fatalf("unexpected token: %q, err=%v", tok, err)
 	}
 
-	env := GitEnv([]string{"PATH=/usr/bin", "GIT_CONFIG_COUNT=99"}, tok, "http://user:proxypass@127.0.0.1:7890")
+	netCfg := config.NetworkConfig{
+		ProxyURL:      "http://user:proxypass@127.0.0.1:7890",
+		HTTPVersion:   "HTTP/1.1",
+		LowSpeedLimit: 1000,
+		LowSpeedTime:  60,
+	}
+	env := GitEnv([]string{"PATH=/usr/bin", "GIT_CONFIG_COUNT=99"}, tok, netCfg)
 	joined := strings.Join(env, "\n")
-	if !strings.Contains(joined, "GIT_CONFIG_COUNT=1") {
-		t.Fatalf("expected GIT_CONFIG_COUNT=1, got %s", joined)
+	if !strings.Contains(joined, "GIT_CONFIG_COUNT=4") {
+		t.Fatalf("expected GIT_CONFIG_COUNT=4, got %s", joined)
+	}
+	if !strings.Contains(joined, "http.version") || !strings.Contains(joined, "HTTP/1.1") || !strings.Contains(joined, "http.lowSpeedLimit") {
+		t.Fatalf("missing HTTP stability git config vars: %s", joined)
 	}
 	if !strings.Contains(joined, "GIT_TERMINAL_PROMPT=0") || !strings.Contains(joined, "HTTPS_PROXY=http://user:proxypass@127.0.0.1:7890") {
 		t.Fatalf("missing expected env vars: %s", joined)

@@ -231,9 +231,9 @@ func (p *TokenProvider) registerTokenSecret(tok string) {
 	p.redactor.Add(basic)
 }
 
-// GitEnv builds the subprocess environment with non-interactive flags, GIT_CONFIG_COUNT auth, and optional proxy.
-func GitEnv(baseEnv []string, token, proxyURL string) []string {
-	filtered := make([]string, 0, len(baseEnv)+10)
+// GitEnv builds the subprocess environment with non-interactive flags, GIT_CONFIG_COUNT auth/HTTP stability settings, and optional proxy.
+func GitEnv(baseEnv []string, token string, netCfg config.NetworkConfig) []string {
+	filtered := make([]string, 0, len(baseEnv)+16)
 	skipPrefixes := []string{
 		"GIT_CONFIG_COUNT=",
 		"GIT_CONFIG_KEY_",
@@ -241,7 +241,8 @@ func GitEnv(baseEnv []string, token, proxyURL string) []string {
 		"GIT_TERMINAL_PROMPT=",
 		"GCM_INTERACTIVE=",
 	}
-	if strings.TrimSpace(proxyURL) != "" {
+	proxyURL := strings.TrimSpace(netCfg.ProxyURL)
+	if proxyURL != "" {
 		skipPrefixes = append(skipPrefixes,
 			"HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=",
 			"http_proxy=", "https_proxy=", "all_proxy=",
@@ -265,16 +266,41 @@ func GitEnv(baseEnv []string, token, proxyURL string) []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GCM_INTERACTIVE=never",
 	)
+
+	type gitConfigKV struct {
+		k, v string
+	}
+	var gitConfigs []gitConfigKV
 	if token != "" {
 		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-		filtered = append(filtered,
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.https://github.com/.extraheader",
-			"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic,
+		gitConfigs = append(gitConfigs, gitConfigKV{
+			k: "http.https://github.com/.extraheader",
+			v: "AUTHORIZATION: basic " + basic,
+		})
+	}
+	if strings.TrimSpace(netCfg.HTTPVersion) != "" {
+		gitConfigs = append(gitConfigs, gitConfigKV{
+			k: "http.version",
+			v: netCfg.HTTPVersion,
+		})
+	}
+	if netCfg.LowSpeedLimit > 0 && netCfg.LowSpeedTime > 0 {
+		gitConfigs = append(gitConfigs,
+			gitConfigKV{k: "http.lowSpeedLimit", v: strconv.Itoa(netCfg.LowSpeedLimit)},
+			gitConfigKV{k: "http.lowSpeedTime", v: strconv.Itoa(netCfg.LowSpeedTime)},
 		)
 	}
+	if len(gitConfigs) > 0 {
+		filtered = append(filtered, "GIT_CONFIG_COUNT="+strconv.Itoa(len(gitConfigs)))
+		for i, kv := range gitConfigs {
+			filtered = append(filtered,
+				fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, kv.k),
+				fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, kv.v),
+			)
+		}
+	}
 
-	if strings.TrimSpace(proxyURL) != "" {
+	if proxyURL != "" {
 		filtered = append(filtered,
 			"HTTP_PROXY="+proxyURL,
 			"HTTPS_PROXY="+proxyURL,

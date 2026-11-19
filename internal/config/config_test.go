@@ -54,6 +54,9 @@ sync:
 	if resolved[1].EnableLFS != LFSAuto || resolved[1].CloneTimeout != 4*time.Hour || resolved[1].MirrorPRRefs || resolved[1].SkipUnchanged {
 		t.Fatalf("unexpected resolved[1]: %+v", resolved[1])
 	}
+	if cfg.Network.HTTPVersion != "HTTP/1.1" || cfg.Network.LowSpeedLimit != 1000 || cfg.Network.LowSpeedTime != 60 {
+		t.Fatalf("unexpected default network stability settings: %+v", cfg.Network)
+	}
 }
 
 func TestValidateRejectsCaseInsensitiveDuplicates(t *testing.T) {

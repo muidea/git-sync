@@ -39,6 +39,9 @@ sync:
 
 network:
   proxy_url: ""
+  http_version: "HTTP/1.1"      # HTTP/1.1 | HTTP/2 | auto（弱网建议保持 HTTP/1.1 防 curl 56 断流）
+  low_speed_limit: 1000         # 低于 1000 B/s 持续 60s 自动断开重连（0 表示禁用）
+  low_speed_time: 60
 
 safety:
   max_missing_alert_ratio: 0.30
