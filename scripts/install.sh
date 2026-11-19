@@ -5,6 +5,7 @@ REPO="${REPO:-muidea/git-sync}"
 BINARY_NAME="git-backup"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 VERSION="${VERSION:-}"
+GITHUB_BASE="${GITHUB_BASE:-https://github.com}"
 TMP_DIR=""
 
 cleanup() {
@@ -36,9 +37,29 @@ detect_arch() {
   esac
 }
 
+check_host_deps() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "WARNING: 'git' is not installed; git >= 2.31 is required at runtime." >&2
+    return
+  fi
+  local ver_str major minor
+  ver_str="$(git --version | awk '{print $3}')"
+  major="${ver_str%%.*}"
+  minor="${ver_str#*.}"
+  minor="${minor%%.*}"
+  if [[ -n "${major}" && -n "${minor}" ]]; then
+    if (( major < 2 || (major == 2 && minor < 31) )); then
+      echo "WARNING: found git ${ver_str}, but git >= 2.31 is required (or use the Docker deployment)." >&2
+    fi
+  fi
+  if ! command -v git-lfs >/dev/null 2>&1; then
+    echo "NOTE: 'git-lfs' is not installed (only required if backing up repositories with Git LFS)." >&2
+  fi
+}
+
 resolve_latest_version() {
   local effective_url tag
-  effective_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
+  effective_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "${GITHUB_BASE%/}/${REPO}/releases/latest")"
   tag="${effective_url##*/}"
   if [[ -z "${tag}" || "${tag}" == "latest" ]]; then
     echo "ERROR: failed to resolve latest release tag from ${effective_url}" >&2
@@ -59,10 +80,11 @@ verify_checksum() {
 }
 
 main() {
-  local os arch ver archive base_url extracted_bin dest
+  local os arch ver archive base_url extracted_bin dest is_upgrade=0
 
   os="$(detect_os)"
   arch="$(detect_arch)"
+  check_host_deps
 
   if [[ -z "${VERSION}" ]]; then
     ver="$(resolve_latest_version)"
@@ -71,9 +93,14 @@ main() {
   fi
 
   archive="${BINARY_NAME}_${ver}_${os}_${arch}.tar.gz"
-  base_url="https://github.com/${REPO}/releases/download/v${ver}"
+  base_url="${GITHUB_BASE%/}/${REPO}/releases/download/v${ver}"
 
   TMP_DIR="$(mktemp -d)"
+
+  dest="${INSTALL_DIR}/${BINARY_NAME}"
+  if [[ -x "${dest}" ]]; then
+    is_upgrade=1
+  fi
 
   echo "Installing ${BINARY_NAME} v${ver} (${os}/${arch})..."
   curl -fsSL "${base_url}/${archive}" -o "${TMP_DIR}/${archive}"
@@ -83,7 +110,6 @@ main() {
   tar -xzf "${TMP_DIR}/${archive}" -C "${TMP_DIR}"
 
   extracted_bin="${TMP_DIR}/${BINARY_NAME}_${ver}_${os}_${arch}/${BINARY_NAME}"
-  dest="${INSTALL_DIR}/${BINARY_NAME}"
 
   if [[ -w "${INSTALL_DIR}" ]] || [[ "$(id -u)" -eq 0 ]]; then
     mkdir -p "${INSTALL_DIR}"
@@ -94,6 +120,17 @@ main() {
   fi
 
   echo "Installed: $("${dest}" version)"
+
+  if [[ "${is_upgrade}" -eq 0 ]]; then
+    cat <<'EOF'
+
+Next steps:
+  1. Initialize config & verify token/repos:
+       git-backup init
+  2. Install & enable periodic systemd timer:
+       sudo git-backup service install        # or: git-backup service install --user
+EOF
+  fi
 }
 
 main "$@"

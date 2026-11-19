@@ -33,6 +33,10 @@ func run(args []string) int {
 	rest := args[1:]
 
 	switch sub {
+	case "init":
+		return cmdInit(ctx, rest)
+	case "service":
+		return cmdService(ctx, rest)
 	case "sync":
 		return cmdSync(ctx, rest)
 	case "targets":
@@ -52,6 +56,89 @@ func run(args []string) int {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown subcommand %q\n\n", sub)
 		printUsage()
+		return app.ExitFatal
+	}
+}
+
+func cmdInit(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	cfgFlag := fs.String("config", "", "Target config.yaml path")
+	rootFlag := fs.String("root", "", "Backup storage directory")
+	reposFlag := fs.String("repos", "", "Comma-separated repositories (owner/repo or GitHub URL)")
+	authMode := fs.String("auth-mode", "", "Auth mode: pat or none")
+	tokenFlag := fs.String("token", "", "GitHub PAT (optional, falls back to env or prompt)")
+	tokenEnv := fs.String("token-env", "GITHUB_BACKUP_TOKEN", "Env var name for GitHub PAT")
+	secretFile := fs.String("secret-file", "", "Path to secret.env (default <config_dir>/secret.env)")
+	webhookType := fs.String("webhook-type", "", "Optional webhook type (feishu|wecom|dingtalk|slack|generic)")
+	webhookURL := fs.String("webhook-url", "", "Optional webhook URL")
+	force := fs.Bool("force", false, "Overwrite existing config.yaml")
+	skipCheck := fs.Bool("skip-check", false, "Skip remote targets --check verification")
+	installSvc := fs.Bool("install-service", false, "Install and enable systemd timer after init")
+	userSvc := fs.Bool("user-service", false, "Install systemd units in --user scope")
+	if err := fs.Parse(args); err != nil {
+		return app.ExitFatal
+	}
+
+	var repos []string
+	if *reposFlag != "" {
+		repos = append(repos, *reposFlag)
+	}
+	repos = append(repos, fs.Args()...)
+
+	return app.RunInit(ctx, app.InitOptions{
+		ConfigPath:     *cfgFlag,
+		RootDir:        *rootFlag,
+		Repos:          repos,
+		AuthMode:       *authMode,
+		Token:          *tokenFlag,
+		TokenEnv:       *tokenEnv,
+		SecretFile:     *secretFile,
+		WebhookType:    *webhookType,
+		WebhookURL:     *webhookURL,
+		Force:          *force,
+		SkipCheck:      *skipCheck,
+		InstallService: *installSvc,
+		UserService:    *userSvc,
+	}, os.Stdout, nil)
+}
+
+func cmdService(ctx context.Context, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: git-backup service <install|uninstall|status> [flags]")
+		return app.ExitFatal
+	}
+	action := args[0]
+	rest := args[1:]
+
+	fs := flag.NewFlagSet("service "+action, flag.ContinueOnError)
+	cfgFlag := fs.String("config", "", "Path to config.yaml")
+	secretFlag := fs.String("secret-file", "", "Path to secret.env (default <config_dir>/secret.env)")
+	interval := fs.String("interval", "0/4:00:00", "systemd OnCalendar schedule")
+	userMode := fs.Bool("user", false, "Install/manage systemd user units (~/.config/systemd/user)")
+	withReport := fs.Bool("with-report", false, "Also install weekly report service and timer")
+	dryRun := fs.Bool("dry-run", false, "Print generated systemd units without writing or enabling")
+	if err := fs.Parse(rest); err != nil {
+		return app.ExitFatal
+	}
+
+	opts := app.ServiceOptions{
+		ConfigPath: *cfgFlag,
+		SecretFile: *secretFlag,
+		Interval:   *interval,
+		UserMode:   *userMode,
+		WithReport: *withReport,
+		DryRun:     *dryRun,
+	}
+
+	switch action {
+	case "install":
+		return app.RunServiceInstall(ctx, opts, os.Stdout)
+	case "uninstall":
+		return app.RunServiceUninstall(ctx, opts, os.Stdout)
+	case "status":
+		return app.RunServiceStatus(ctx, *userMode, os.Stdout)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown service action %q (expected install, uninstall, or status)\n", action)
 		return app.ExitFatal
 	}
 }
@@ -191,6 +278,8 @@ func printUsage() {
 	fmt.Print(`git-backup - Whitelist-driven GitHub repository mirror backup CLI
 
 Usage:
+  git-backup init [--repos <r1,r2>] [--root <dir>] [--config <path>] [--install-service]
+  git-backup service <install|uninstall|status> [--config <path>] [--user] [--with-report] [--dry-run]
   git-backup sync [--config <path>]
   git-backup targets --check [--config <path>]
   git-backup status [--config <path> | --root <dir>] [--failed] [--stale 168h] [--json]

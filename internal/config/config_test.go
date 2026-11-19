@@ -93,3 +93,21 @@ func TestDiscoverConfigPathPrecedence(t *testing.T) {
 		t.Fatalf("expected env config %q, got %q, err=%v", envCfg, got, err)
 	}
 }
+
+func TestNormalizeRepoName(t *testing.T) {
+	cases := map[string]string{
+		"muidea/magicCommon":                   "muidea/magicCommon",
+		"git@github.com:muidea/magicCommon.git": "muidea/magicCommon",
+		"https://github.com/muidea/magicRunner": "muidea/magicRunner",
+		"https://github.com/muidea/git-sync.git/": "muidea/git-sync",
+	}
+	for in, want := range cases {
+		got, err := NormalizeRepoName(in)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeRepoName(%q) = (%q, %v), want %q", in, got, err, want)
+		}
+	}
+	if _, err := NormalizeRepoName("invalid-repo"); err == nil {
+		t.Fatal("expected error for invalid repo format")
+	}
+}

@@ -35,3 +35,23 @@ jobs:
 
       - name: Build Binary
         run: go build -ldflags="-s -w" -o ./bin/git-backup ./cmd/git-backup
+
+      - name: Check Shell Scripts Syntax
+        run: bash -n scripts/install.sh && sh -n scripts/docker-entrypoint.sh
+
+  docker-check:
+    name: Docker Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: git-backup:ci

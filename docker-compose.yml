@@ -1,0 +1,16 @@
+services:
+  git-backup:
+    image: ghcr.io/muidea/git-sync:latest
+    # build: .
+    container_name: git-backup
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Shanghai"
+      CRON_SCHEDULE: "0 */4 * * *"
+      RUN_ON_START: "true"
+      # WEEKLY_REPORT_CRON: "0 9 * * 1"
+      GITHUB_BACKUP_TOKEN: "${GITHUB_BACKUP_TOKEN:-}"
+      BACKUP_ALERT_WEBHOOK: "${BACKUP_ALERT_WEBHOOK:-}"
+    volumes:
+      - ./config.yaml:/etc/git-backup/config.yaml:ro
+      - ./backups:/data/github-backups

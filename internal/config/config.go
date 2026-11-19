@@ -165,8 +165,39 @@ type AlertConfig struct {
 	AlertCooldown    Duration `yaml:"alert_cooldown"`
 }
 
+// UserConfigPath returns ~/.config/git-backup/config.yaml if a home directory can be resolved.
+func UserConfigPath() string {
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".config", "git-backup", "config.yaml")
+	}
+	return ""
+}
+
+// NormalizeRepoName converts owner/repo, HTTPS URLs, or SSH URLs into validated owner/repo format.
+func NormalizeRepoName(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimSuffix(s, "/")
+	for _, prefix := range []string{
+		"git@github.com:",
+		"ssh://git@github.com/",
+		"https://github.com/",
+		"http://github.com/",
+	} {
+		if strings.HasPrefix(strings.ToLower(s), prefix) {
+			s = s[len(prefix):]
+			break
+		}
+	}
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.Trim(s, "/")
+	if !repoNamePattern.MatchString(s) {
+		return "", fmt.Errorf("invalid repository %q: expected owner/repo or GitHub URL", raw)
+	}
+	return s, nil
+}
+
 // DiscoverConfigPath resolves the config file path using the documented precedence:
-// --config flag > GIT_BACKUP_CONFIG env > ./config.yaml > /etc/git-backup/config.yaml.
+// --config flag > GIT_BACKUP_CONFIG env > ./config.yaml > ~/.config/git-backup/config.yaml > /etc/git-backup/config.yaml.
 func DiscoverConfigPath(flagPath string) (string, error) {
 	if strings.TrimSpace(flagPath) != "" {
 		return flagPath, nil
@@ -174,13 +205,17 @@ func DiscoverConfigPath(flagPath string) (string, error) {
 	if envPath := strings.TrimSpace(os.Getenv(DefaultConfigEnv)); envPath != "" {
 		return envPath, nil
 	}
-	candidates := []string{"./config.yaml", SystemConfigPath}
+	candidates := []string{"./config.yaml"}
+	if userCfg := UserConfigPath(); userCfg != "" {
+		candidates = append(candidates, userCfg)
+	}
+	candidates = append(candidates, SystemConfigPath)
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("config file not found; specify --config, set %s, or create ./config.yaml or %s", DefaultConfigEnv, SystemConfigPath)
+	return "", fmt.Errorf("config file not found; specify --config, set %s, or run `git-backup init`", DefaultConfigEnv)
 }
 
 // Load reads, applies defaults to, and validates the YAML configuration at path.

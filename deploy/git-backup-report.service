@@ -1,0 +1,12 @@
+[Unit]
+Description=Send weekly git-backup health report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/git-backup/secret.env
+ExecStart=/usr/local/bin/git-backup report --weekly --config /etc/git-backup/config.yaml
+
+[Install]
+WantedBy=multi-user.target

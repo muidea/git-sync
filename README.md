@@ -67,68 +67,42 @@ sudo install -m 0755 ./bin/git-backup /usr/local/bin/git-backup
 
 ## 快速开始
 
-### 1. 准备配置文件
+### 1. 一键初始化配置并校验权限
 
-参考 [configs/config.example.yaml](./configs/config.example.yaml) 创建 `/etc/git-backup/config.yaml`：
+支持交互式向导或单行参数初始化（自动生成 `config.yaml`、`0600` 权限的 `secret.env`，并自动运行 `targets --check` 验证 Token 权限；`--repos` 支持直接传入 `owner/repo` 或 `git@github.com:...` / `https://github.com/...` 地址）：
 
-```yaml
-storage:
-  root_dir: "/data/github-backups"
-  trash_retention_days: 30
-  gc_interval_syncs: 25
-  min_free_disk_percent: 10
-  min_free_disk_gb: 20
+```bash
+# 交互式初始化
+git-backup init
 
-auth:
-  mode: "pat"                   # pat | github_app | none（仅公开库可用 none）
-  token_env: "GITHUB_BACKUP_TOKEN"
-
-defaults:
-  enable_lfs: "auto"            # true | false | auto
-  mirror_pr_refs: true
-  clone_timeout: "1h"
-  update_timeout: "15m"
-  unmanaged_policy: "retain"    # retain | archive
-
-targets:
-  - repo: "muidea/magicCommon"
-  - repo: "muidea/magicRunner"
-    update_timeout: "30m"
-
-sync:
-  concurrency: 6
-  skip_unchanged: true
-  force_full_sync_days: 7
-  max_retries: 3
+# 或非交互式一步完成配置、验证并托管 systemd 定时任务（非 root 可加 --user-service）
+sudo git-backup init \
+  --root /data/github-backups \
+  --repos "muidea/magicCommon,muidea/magicRunner" \
+  --token "github_pat_xxx" \
+  --install-service
 ```
 
 > **GitHub Fine-grained PAT 最小权限要求**：在 GitHub Token 设置中为目标仓库授予 **`Metadata: Read-only`** 与 **`Contents: Read-only`**。若仅勾选 `Metadata` 而不勾选 `Contents`，预检可通但 `git clone` 会返回 `403`。
 
-### 2. 配置环境变量并预检
+如需手动编写配置文件，可参考 [configs/config.example.yaml](./configs/config.example.yaml)。
+
+### 2. 手动执行同步与校验
 
 ```bash
-export GITHUB_BACKUP_TOKEN="github_pat_xxx"
-
-# 仅校验配置与远端可达性，不写磁盘
-git-backup targets --check --config /etc/git-backup/config.yaml
-```
-
-### 3. 执行同步与校验
-
-```bash
-# 执行同步
-git-backup sync --config /etc/git-backup/config.yaml
+# 执行同步（自动查找配置文件，也可通过 --config 指定）
+git-backup sync
 
 # 查看状态表格（也可通过 --root 脱离配置文件读取）
-git-backup status --config /etc/git-backup/config.yaml
+git-backup status
 git-backup status --failed
 git-backup status --stale 168h --json
 
 # 实时比对远端 ls-remote 与本地 show-ref，并检查本地 Git 对象完整性
-git-backup verify --fsck --config /etc/git-backup/config.yaml
+git-backup verify --fsck
 ```
 
-配置文件查找优先级：`--config` 参数 > 环境变量 `GIT_BACKUP_CONFIG` > `./config.yaml` > `/etc/git-backup/config.yaml`。
+配置文件查找优先级：`--config` 参数 > 环境变量 `GIT_BACKUP_CONFIG` > `./config.yaml` > `~/.config/git-backup/config.yaml` > `/etc/git-backup/config.yaml`。
 
 ---
 
@@ -136,6 +110,8 @@ git-backup verify --fsck --config /etc/git-backup/config.yaml
 
 | 命令 | 说明 |
 | :--- | :--- |
+| `git-backup init [flags]` | 交互/非交互初始化配置、密钥文件并校验远端可达性 |
+| `git-backup service <install\|uninstall\|status>` | 一键安装/卸载/查看 `systemd` 定时任务（支持 `--user` 无 root 运行） |
 | `git-backup sync [--config <path>]` | 执行一次完整白名单对账与镜像同步 |
 | `git-backup targets --check [--config <path>]` | 预检配置语法、远端可达性/改名与待失管清单 |
 | `git-backup status [--root <dir>] [--failed] [--stale 168h] [--json]` | 读取本地账本展示同步健康状态 |
@@ -150,29 +126,41 @@ git-backup verify --fsck --config /etc/git-backup/config.yaml
 
 ---
 
-## 生产环境 `systemd` 部署
+## 生产环境部署
 
-仓库 [deploy/](./deploy) 目录已提供开箱即用的 `systemd` 单元模板：
+### 方式一：`systemd` 托管（内置一键安装）
 
 ```bash
-# 1. 创建隔离密钥文件（仅 root 可读）
-sudo mkdir -p /etc/git-backup /data/github-backups
-sudo tee /etc/git-backup/secret.env >/dev/null <<'EOF'
-GITHUB_BACKUP_TOKEN=github_pat_xxx
-BACKUP_ALERT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
-EOF
-sudo chmod 0600 /etc/git-backup/secret.env
+# 系统级定时任务（默认每 4 小时同步一次；加 --with-report 同时开启周一 09:00 周报）
+sudo git-backup service install --with-report
 
-# 2. 安装并启用服务与定时器
-sudo cp deploy/git-backup.service /etc/systemd/system/
-sudo cp deploy/git-backup.timer /etc/systemd/system/
-sudo cp deploy/git-backup-report.timer /etc/systemd/system/   # 可选：每周一 09:00 周报
-sudo systemctl daemon-reload
-sudo systemctl enable --now git-backup.timer
+# 普通用户级定时任务（无需 root）
+git-backup service install --user
 
-# 3. 查看定时任务与日志
-systemctl list-timers git-backup*
+# 查看定时器状态与日志
+git-backup service status
 journalctl -u git-backup.service -n 50 --no-pager
+
+# 预览生成的 unit 文件（不落盘）或卸载
+git-backup service install --dry-run
+sudo git-backup service uninstall
+```
+
+### 方式二：Docker / Docker Compose 部署（推荐 NAS / 老版本系统）
+
+容器镜像内置最新 `git` 与 `git-lfs`，无需在宿主机安装或升级依赖：
+
+```bash
+# 1. 准备 config.yaml（其中 storage.root_dir 保持默认 /data/github-backups）
+cp configs/config.example.yaml config.yaml
+
+# 2. 配置环境变量并启动后台定时备份（启动时默认立即同步一次，之后按 CRON_SCHEDULE 调度）
+export GITHUB_BACKUP_TOKEN="github_pat_xxx"
+docker compose up -d
+
+# 3. 随时执行状态查询或一致性校验
+docker compose exec git-backup git-backup status
+docker compose exec git-backup git-backup verify --fsck
 ```
 
 ---

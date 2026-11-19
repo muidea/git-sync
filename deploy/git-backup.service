@@ -2,11 +2,12 @@
 Description=GitHub Repository Mirror Backup
 After=network-online.target
 Wants=network-online.target
-OnFailure=git-backup-emergency-notify.service
+# Optional emergency fallback unit for exit code 1 or OOM:
+# OnFailure=git-backup-emergency-notify.service
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/git-backup/secret.env
+EnvironmentFile=-/etc/git-backup/secret.env
 ExecStart=/usr/local/bin/git-backup sync --config /etc/git-backup/config.yaml
 SuccessExitStatus=0 2
 IOSchedulingClass=best-effort
