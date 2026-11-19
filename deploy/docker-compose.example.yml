@@ -1,0 +1,26 @@
+services:
+  git-backup:
+    image: ghcr.io/muidea/git-sync:latest   # 可锁定具体版本如 :0.0.2
+    container_name: git-backup
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Shanghai"
+      # 定时同步 Cron（标准 5 段格式，默认每 4 小时执行一次）
+      CRON_SCHEDULE: "0 */4 * * *"
+      # 容器启动时是否立即执行一次同步
+      RUN_ON_START: "true"
+      # 可选：每周健康度周报 Cron（如每周一 09:00）
+      WEEKLY_REPORT_CRON: "${WEEKLY_REPORT_CRON:-}"
+      # 认证与告警环境变量（建议放在同目录 .env 文件中）
+      GITHUB_BACKUP_TOKEN: "${GITHUB_BACKUP_TOKEN:-}"
+      BACKUP_ALERT_WEBHOOK: "${BACKUP_ALERT_WEBHOOK:-}"
+      BACKUP_ALERT_SECRET: "${BACKUP_ALERT_SECRET:-}"
+    volumes:
+      # 1. 声明式配置文件（注意内部 storage.root_dir 需为 /data/github-backups）
+      - ./config.yaml:/etc/git-backup/config.yaml:ro
+      # 2. 本地裸仓库备份持久化目录
+      - ./backups:/data/github-backups
+      # 3. 可选：如使用 GitHub App 模式，挂载私钥文件
+      # - ./app-private-key.pem:/etc/git-backup/app-private-key.pem:ro
+      # 4. 可选：如对接宿主机 node_exporter，挂载 textfile_collector 目录
+      # - /var/lib/node_exporter/textfile_collector:/var/lib/node_exporter/textfile_collector

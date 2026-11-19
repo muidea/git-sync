@@ -148,17 +148,78 @@ sudo git-backup service uninstall
 
 ### 方式二：Docker / Docker Compose 部署（推荐 NAS / 老版本系统）
 
-容器镜像内置最新 `git` 与 `git-lfs`，无需在宿主机安装或升级依赖：
+容器镜像（支持 `linux/amd64`、`linux/arm64`）内置最新 `git` 与 `git-lfs`，无需在宿主机安装或升级依赖。
+
+无需克隆代码仓库，新建部署目录并创建 `docker-compose.yml` 与 `config.yaml` 即可启动（完整带注释模板见 [deploy/docker-compose.example.yml](./deploy/docker-compose.example.yml)）：
+
+```yaml
+# docker-compose.yml
+services:
+  git-backup:
+    image: ghcr.io/muidea/git-sync:latest
+    container_name: git-backup
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Shanghai"
+      CRON_SCHEDULE: "0 */4 * * *"
+      RUN_ON_START: "true"
+      # WEEKLY_REPORT_CRON: "0 9 * * 1"
+      GITHUB_BACKUP_TOKEN: "${GITHUB_BACKUP_TOKEN:-}"
+      BACKUP_ALERT_WEBHOOK: "${BACKUP_ALERT_WEBHOOK:-}"
+      BACKUP_ALERT_SECRET: "${BACKUP_ALERT_SECRET:-}"
+    volumes:
+      - ./config.yaml:/etc/git-backup/config.yaml:ro
+      - ./backups:/data/github-backups
+      # 如使用 GitHub App，额外挂载私钥：
+      # - ./app-private-key.pem:/etc/git-backup/app-private-key.pem:ro
+```
+
+配套最小 `config.yaml` 示例（`storage.root_dir` 保持容器内路径 `/data/github-backups`）：
+
+```yaml
+storage:
+  root_dir: "/data/github-backups"
+  trash_retention_days: 30
+  gc_interval_syncs: 25
+  min_free_disk_percent: 10
+  min_free_disk_gb: 20
+
+auth:
+  mode: "pat"
+  token_env: "GITHUB_BACKUP_TOKEN"
+
+defaults:
+  enable_lfs: "auto"
+  mirror_pr_refs: true
+  clone_timeout: "1h"
+  update_timeout: "15m"
+  unmanaged_policy: "retain"
+
+targets:
+  - repo: "muidea/magicCommon"
+  - repo: "muidea/magicRunner"
+
+sync:
+  concurrency: 6
+  skip_unchanged: true
+  force_full_sync_days: 7
+  max_retries: 3
+```
+
+启动与日常运维命令：
 
 ```bash
-# 1. 准备 config.yaml（其中 storage.root_dir 保持默认 /data/github-backups）
-cp configs/config.example.yaml config.yaml
+# 1. 创建同目录 .env（或直接 export GITHUB_BACKUP_TOKEN）
+cat > .env <<'EOF'
+GITHUB_BACKUP_TOKEN=github_pat_xxx
+EOF
+chmod 600 .env
 
-# 2. 配置环境变量并启动后台定时备份（启动时默认立即同步一次，之后按 CRON_SCHEDULE 调度）
-export GITHUB_BACKUP_TOKEN="github_pat_xxx"
+# 2. 启动后台定时备份（启动时立即执行首次同步，之后按 CRON_SCHEDULE 调度）
 docker compose up -d
 
-# 3. 随时执行状态查询或一致性校验
+# 3. 查看日志、状态或手动触发校验
+docker compose logs -f
 docker compose exec git-backup git-backup status
 docker compose exec git-backup git-backup verify --fsck
 ```

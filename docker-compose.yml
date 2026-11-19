@@ -11,6 +11,7 @@ services:
       # WEEKLY_REPORT_CRON: "0 9 * * 1"
       GITHUB_BACKUP_TOKEN: "${GITHUB_BACKUP_TOKEN:-}"
       BACKUP_ALERT_WEBHOOK: "${BACKUP_ALERT_WEBHOOK:-}"
+      BACKUP_ALERT_SECRET: "${BACKUP_ALERT_SECRET:-}"
     volumes:
       - ./config.yaml:/etc/git-backup/config.yaml:ro
       - ./backups:/data/github-backups
