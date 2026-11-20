@@ -1,11 +1,14 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +80,38 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// MarshalJSON serializes Duration as a human-readable string (or empty string if zero).
+func (d Duration) MarshalJSON() ([]byte, error) {
+	if d.Duration == 0 {
+		return json.Marshal("")
+	}
+	return json.Marshal(d.Duration.String())
+}
+
+// UnmarshalJSON parses duration strings (or integer nanoseconds) from JSON.
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			d.Duration = 0
+			return nil
+		}
+		parsed, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		d.Duration = parsed
+		return nil
+	}
+	var ns int64
+	if err := json.Unmarshal(data, &ns); err != nil {
+		return fmt.Errorf("duration must be string or integer nanoseconds: %w", err)
+	}
+	d.Duration = time.Duration(ns)
+	return nil
+}
+
 // Config defines the declarative configuration schema for git-backup.
 type Config struct {
 	Storage       StorageConfig       `yaml:"storage"`
@@ -87,6 +122,7 @@ type Config struct {
 	Network       NetworkConfig       `yaml:"network"`
 	Safety        SafetyConfig        `yaml:"safety"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	Server        ServerConfig        `yaml:"server"`
 }
 
 type StorageConfig struct {
@@ -114,12 +150,20 @@ type DefaultsConfig struct {
 }
 
 type TargetConfig struct {
-	Repo          string   `yaml:"repo"`
-	EnableLFS     *LFSMode `yaml:"enable_lfs,omitempty"`
-	MirrorPRRefs  *bool    `yaml:"mirror_pr_refs,omitempty"`
-	CloneTimeout  Duration `yaml:"clone_timeout,omitempty"`
-	UpdateTimeout Duration `yaml:"update_timeout,omitempty"`
-	SkipUnchanged *bool    `yaml:"skip_unchanged,omitempty"`
+	Repo          string   `yaml:"repo" json:"repo"`
+	EnableLFS     *LFSMode `yaml:"enable_lfs,omitempty" json:"enable_lfs,omitempty"`
+	MirrorPRRefs  *bool    `yaml:"mirror_pr_refs,omitempty" json:"mirror_pr_refs,omitempty"`
+	CloneTimeout  Duration `yaml:"clone_timeout,omitempty" json:"clone_timeout,omitempty"`
+	UpdateTimeout Duration `yaml:"update_timeout,omitempty" json:"update_timeout,omitempty"`
+	SkipUnchanged *bool    `yaml:"skip_unchanged,omitempty" json:"skip_unchanged,omitempty"`
+}
+
+type ServerConfig struct {
+	Listen           string   `yaml:"listen"`
+	APITokenEnv      string   `yaml:"api_token_env"`
+	UIEnabled        *bool    `yaml:"ui_enabled"`
+	SyncInterval     Duration `yaml:"sync_interval"`
+	WeeklyReportCron string   `yaml:"weekly_report_cron"`
 }
 
 // ResolvedTarget holds the effective merged settings for a single whitelisted repository.
@@ -239,6 +283,7 @@ func Load(path string) (*Config, error) {
 
 func defaultConfig() *Config {
 	mirrorPR := true
+	uiEnabled := true
 	return &Config{
 		Storage: StorageConfig{
 			TrashRetentionDays: 30,
@@ -278,6 +323,12 @@ func defaultConfig() *Config {
 				FailureThreshold: 2,
 				AlertCooldown:    Duration{Duration: 24 * time.Hour},
 			},
+		},
+		Server: ServerConfig{
+			Listen:       "127.0.0.1:8080",
+			APITokenEnv:  "BACKUP_API_TOKEN",
+			UIEnabled:    &uiEnabled,
+			SyncInterval: Duration{Duration: 4 * time.Hour},
 		},
 	}
 }
@@ -334,9 +385,6 @@ func (c *Config) Validate() error {
 		return errors.New("defaults.clone_timeout and defaults.update_timeout must be > 0")
 	}
 
-	if len(c.Targets) == 0 {
-		return errors.New("targets whitelist must not be empty")
-	}
 	seen := make(map[string]struct{}, len(c.Targets))
 	for i := range c.Targets {
 		repo := strings.TrimSpace(c.Targets[i].Repo)
@@ -411,18 +459,94 @@ func (c *Config) Validate() error {
 		return errors.New("observability.alert.failure_threshold must be >= 1")
 	}
 
+	c.Server.Listen = strings.TrimSpace(c.Server.Listen)
+	if c.Server.Listen == "" {
+		c.Server.Listen = "127.0.0.1:8080"
+	}
+	if _, _, err := net.SplitHostPort(c.Server.Listen); err != nil {
+		return fmt.Errorf("invalid server.listen %q: %w", c.Server.Listen, err)
+	}
+	c.Server.APITokenEnv = strings.TrimSpace(c.Server.APITokenEnv)
+	if c.Server.APITokenEnv == "" {
+		c.Server.APITokenEnv = "BACKUP_API_TOKEN"
+	}
+	if c.Server.SyncInterval.Duration < 0 {
+		return errors.New("server.sync_interval must be >= 0")
+	}
+	if strings.TrimSpace(c.Server.WeeklyReportCron) != "" {
+		if _, _, _, err := ParseWeeklyCron(c.Server.WeeklyReportCron); err != nil {
+			return fmt.Errorf("invalid server.weekly_report_cron: %w", err)
+		}
+	}
+
 	return nil
 }
 
-// ResolveTargets merges global defaults with per-target overrides.
+// IsLoopbackListen reports whether listenAddr binds strictly to loopback (127.0.0.1, ::1, or localhost).
+func IsLoopbackListen(listenAddr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ParseWeeklyCron parses "MON 09:00" into weekday, hour, and minute.
+func ParseWeeklyCron(spec string) (time.Weekday, int, int, error) {
+	fields := strings.Fields(strings.TrimSpace(spec))
+	if len(fields) != 2 {
+		return 0, 0, 0, fmt.Errorf("expected '<WEEKDAY> <HH:MM>', got %q", spec)
+	}
+	var wd time.Weekday
+	switch strings.ToUpper(fields[0]) {
+	case "SUN":
+		wd = time.Sunday
+	case "MON":
+		wd = time.Monday
+	case "TUE":
+		wd = time.Tuesday
+	case "WED":
+		wd = time.Wednesday
+	case "THU":
+		wd = time.Thursday
+	case "FRI":
+		wd = time.Friday
+	case "SAT":
+		wd = time.Saturday
+	default:
+		return 0, 0, 0, fmt.Errorf("unknown weekday %q (expected SUN..SAT)", fields[0])
+	}
+	parts := strings.Split(fields[1], ":")
+	if len(parts) != 2 {
+		return 0, 0, 0, fmt.Errorf("expected HH:MM, got %q", fields[1])
+	}
+	hour, err1 := strconv.Atoi(parts[0])
+	min, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || hour < 0 || hour > 23 || min < 0 || min > 59 {
+		return 0, 0, 0, fmt.Errorf("invalid time %q", fields[1])
+	}
+	return wd, hour, min, nil
+}
+
+// ResolveTargets merges global defaults with c.Targets.
 func (c *Config) ResolveTargets() []ResolvedTarget {
-	out := make([]ResolvedTarget, 0, len(c.Targets))
+	return c.ResolveTargetList(c.Targets)
+}
+
+// ResolveTargetList merges global defaults with an arbitrary TargetConfig slice (e.g. from targets.json).
+func (c *Config) ResolveTargetList(targets []TargetConfig) []ResolvedTarget {
+	out := make([]ResolvedTarget, 0, len(targets))
 	defaultMirrorPR := true
 	if c.Defaults.MirrorPRRefs != nil {
 		defaultMirrorPR = *c.Defaults.MirrorPRRefs
 	}
 
-	for _, t := range c.Targets {
+	for _, t := range targets {
 		parts := strings.SplitN(t.Repo, "/", 2)
 		rt := ResolvedTarget{
 			Repo:          t.Repo,

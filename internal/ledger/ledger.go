@@ -265,25 +265,55 @@ func RelativeRepoPath(fullName string) string {
 	return filepath.ToSlash(filepath.Join("repos", fullName+".git"))
 }
 
-// CheckDiskSpace validates free disk thresholds using both percentage and absolute GB bounds.
-func CheckDiskSpace(rootDir string, minPercent, minGB float64) error {
+// DiskInfo captures filesystem capacity metrics for storage.root_dir.
+type DiskInfo struct {
+	TotalBytes   uint64  `json:"total_bytes"`
+	AvailBytes   uint64  `json:"avail_bytes"`
+	UsedBytes    uint64  `json:"used_bytes"`
+	AvailPercent float64 `json:"avail_percent"`
+}
+
+// GetDiskInfo inspects the filesystem hosting rootDir.
+func GetDiskInfo(rootDir string) (DiskInfo, error) {
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
-		return fmt.Errorf("ensure root_dir %q: %w", rootDir, err)
+		return DiskInfo{}, fmt.Errorf("ensure root_dir %q: %w", rootDir, err)
 	}
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(rootDir, &st); err != nil {
-		return fmt.Errorf("statfs %q: %w", rootDir, err)
+		return DiskInfo{}, fmt.Errorf("statfs %q: %w", rootDir, err)
 	}
 	if st.Blocks == 0 || st.Bsize <= 0 {
+		return DiskInfo{}, nil
+	}
+	totalBytes := st.Blocks * uint64(st.Bsize)
+	availBytes := st.Bavail * uint64(st.Bsize)
+	freeBytes := st.Bfree * uint64(st.Bsize)
+	var usedBytes uint64
+	if totalBytes >= freeBytes {
+		usedBytes = totalBytes - freeBytes
+	}
+	availPercent := (float64(availBytes) / float64(totalBytes)) * 100.0
+	return DiskInfo{
+		TotalBytes:   totalBytes,
+		AvailBytes:   availBytes,
+		UsedBytes:    usedBytes,
+		AvailPercent: availPercent,
+	}, nil
+}
+
+// CheckDiskSpace validates free disk thresholds using both percentage and absolute GB bounds.
+func CheckDiskSpace(rootDir string, minPercent, minGB float64) error {
+	info, err := GetDiskInfo(rootDir)
+	if err != nil {
+		return err
+	}
+	if info.TotalBytes == 0 {
 		return nil
 	}
-	totalBytes := float64(st.Blocks) * float64(st.Bsize)
-	availBytes := float64(st.Bavail) * float64(st.Bsize)
-	availPercent := (availBytes / totalBytes) * 100.0
-	availGB := availBytes / (1024 * 1024 * 1024)
+	availGB := float64(info.AvailBytes) / (1024 * 1024 * 1024)
 
-	if minPercent > 0 && availPercent < minPercent {
-		return fmt.Errorf("insufficient disk space on %s: %.2f%% free (< %.2f%% threshold)", rootDir, availPercent, minPercent)
+	if minPercent > 0 && info.AvailPercent < minPercent {
+		return fmt.Errorf("insufficient disk space on %s: %.2f%% free (< %.2f%% threshold)", rootDir, info.AvailPercent, minPercent)
 	}
 	if minGB > 0 && availGB < minGB {
 		return fmt.Errorf("insufficient disk space on %s: %.2f GB free (< %.2f GB threshold)", rootDir, availGB, minGB)

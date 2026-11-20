@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/muidea/git-backup/internal/auth"
 	"github.com/muidea/git-backup/internal/config"
@@ -18,58 +19,89 @@ import (
 )
 
 type VerifyOptions struct {
-	RepoFilter string
-	RunFsck    bool
-	JSON       bool
+	RepoFilter  string
+	RepoFilters []string
+	RunFsck     bool
+	JSON        bool
+	ProgressFn  func(completed, total int, currentRepo string)
 }
 
 // RunVerify compares live remote `git ls-remote` refs against local `git show-ref` for reachable targets.
 func RunVerify(ctx context.Context, cfg *config.Config, opts VerifyOptions, out io.Writer, hooks *Hooks) int {
-	if out == nil {
-		out = os.Stdout
-	}
+	_, code := RunVerifyWithResults(ctx, cfg, opts, out, hooks)
+	return code
+}
+
+// RunVerifyWithResults executes verification and returns structured per-repo outcomes plus exit code.
+func RunVerifyWithResults(ctx context.Context, cfg *config.Config, opts VerifyOptions, out io.Writer, hooks *Hooks) ([]gitops.VerifyResult, int) {
 	redactor := auth.NewRedactor()
 	tp, err := auth.NewTokenProvider(cfg.Auth, cfg.Network.ProxyURL, redactor)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: auth init failed: %v\n", err)
-		return ExitFatal
+		if out != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: auth init failed: %v\n", err)
+		}
+		return nil, ExitFatal
 	}
 	if _, err := tp.Token(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: obtain auth token failed: %v\n", err)
-		return ExitFatal
+		if out != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: obtain auth token failed: %v\n", err)
+		}
+		return nil, ExitFatal
 	}
 
 	repLedger, err := ledger.LoadLedger(cfg.Storage.RootDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: load repo_ledger.json failed: %v\n", err)
-		return ExitFatal
+		if out != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: load repo_ledger.json failed: %v\n", err)
+		}
+		return nil, ExitFatal
 	}
 
-	targets := cfg.ResolveTargets()
+	tf, _, err := ledger.LoadOrMigrateTargets(cfg.Storage.RootDir, cfg.Targets)
+	if err != nil {
+		if out != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: load targets.json failed: %v\n", err)
+		}
+		return nil, ExitFatal
+	}
+	targets := cfg.ResolveTargetList(tf.Targets)
+
 	type verifyJob struct {
 		target   config.ResolvedTarget
 		repoDir  string
 		cloneURL string
 	}
 
-	var jobsList []verifyJob
-	filterKey := strings.ToLower(strings.TrimSpace(opts.RepoFilter))
+	filterSet := make(map[string]struct{})
+	if fk := strings.ToLower(strings.TrimSpace(opts.RepoFilter)); fk != "" {
+		filterSet[fk] = struct{}{}
+	}
+	for _, f := range opts.RepoFilters {
+		if fk := strings.ToLower(strings.TrimSpace(f)); fk != "" {
+			filterSet[fk] = struct{}{}
+		}
+	}
+	hasFilter := len(filterSet) > 0
 
+	var jobsList []verifyJob
 	for _, t := range targets {
 		rec := repLedger.FindByFullName(t.Repo)
 		canonicalName := t.Repo
 		if rec != nil {
 			canonicalName = rec.FullName
 		}
-		if filterKey != "" && t.CanonicalKey != filterKey && strings.ToLower(canonicalName) != filterKey {
-			continue
+		if hasFilter {
+			_, m1 := filterSet[t.CanonicalKey]
+			_, m2 := filterSet[strings.ToLower(canonicalName)]
+			if !m1 && !m2 {
+				continue
+			}
 		}
 		// Automatically skip missing and unmanaged entries during full verify.
 		if rec != nil && (rec.State == ledger.StatusMissing || rec.State == ledger.StatusUnmanaged) {
-			if filterKey == "" {
-				continue
+			if hasFilter && out != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: repository %s is currently %s, skipping verify\n", canonicalName, rec.State)
 			}
-			fmt.Fprintf(os.Stderr, "WARNING: repository %s is currently %s, skipping verify\n", canonicalName, rec.State)
 			continue
 		}
 
@@ -90,9 +122,11 @@ func RunVerify(ctx context.Context, cfg *config.Config, opts VerifyOptions, out 
 		})
 	}
 
-	if filterKey != "" && len(jobsList) == 0 {
-		fmt.Fprintf(os.Stderr, "ERROR: repository %q not found in active targets\n", opts.RepoFilter)
-		return ExitFatal
+	if hasFilter && len(jobsList) == 0 {
+		if out != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: matching repository not found in active reachable targets\n")
+		}
+		return nil, ExitFatal
 	}
 
 	results := make([]gitops.VerifyResult, len(jobsList))
@@ -110,6 +144,11 @@ func RunVerify(ctx context.Context, cfg *config.Config, opts VerifyOptions, out 
 		workers = len(jobsList)
 	}
 
+	if opts.ProgressFn != nil {
+		opts.ProgressFn(0, len(jobsList), "")
+	}
+
+	var doneCount atomic.Int32
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -123,23 +162,27 @@ func RunVerify(ctx context.Context, cfg *config.Config, opts VerifyOptions, out 
 						OK:    false,
 						Error: fmt.Sprintf("local mirror missing at %s", job.repoDir),
 					}
-					continue
-				}
-				tok, tokErr := tp.Token(ctx)
-				if tokErr != nil {
-					results[idx] = gitops.VerifyResult{
-						Repo:  job.target.Repo,
-						OK:    false,
-						Error: tokErr.Error(),
+				} else {
+					tok, tokErr := tp.Token(ctx)
+					if tokErr != nil {
+						results[idx] = gitops.VerifyResult{
+							Repo:  job.target.Repo,
+							OK:    false,
+							Error: tokErr.Error(),
+						}
+					} else {
+						env := auth.GitEnv(os.Environ(), tok, cfg.Network)
+						jobCtx, cancel := context.WithTimeout(ctx, job.target.UpdateTimeout)
+						res := gitops.VerifyRefs(jobCtx, job.repoDir, job.target.Repo, job.cloneURL, job.target.MirrorPRRefs, opts.RunFsck, env)
+						cancel()
+						res.Error = redactor.Redact(res.Error)
+						results[idx] = res
 					}
-					continue
 				}
-				env := auth.GitEnv(os.Environ(), tok, cfg.Network)
-				jobCtx, cancel := context.WithTimeout(ctx, job.target.UpdateTimeout)
-				res := gitops.VerifyRefs(jobCtx, job.repoDir, job.target.Repo, job.cloneURL, job.target.MirrorPRRefs, opts.RunFsck, env)
-				cancel()
-				res.Error = redactor.Redact(res.Error)
-				results[idx] = res
+				n := int(doneCount.Add(1))
+				if opts.ProgressFn != nil {
+					opts.ProgressFn(n, len(jobsList), job.target.Repo)
+				}
 			}
 		}()
 	}
@@ -153,33 +196,35 @@ func RunVerify(ctx context.Context, cfg *config.Config, opts VerifyOptions, out 
 		}
 	}
 
-	if opts.JSON {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(results); err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: encode verify json: %v\n", err)
-			return ExitFatal
-		}
-	} else {
-		fmt.Fprintf(out, "=== Reference Integrity Verification (%d repositories) ===\n", len(results))
-		for _, r := range results {
-			if r.OK {
-				fmt.Fprintf(out, "[OK]   %s\n", r.Repo)
-				continue
+	if out != nil {
+		if opts.JSON {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(results); err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: encode verify json: %v\n", err)
+				return results, ExitFatal
 			}
-			fmt.Fprintf(out, "[FAIL] %s", r.Repo)
-			if r.Error != "" {
-				fmt.Fprintf(out, " (%s)", r.Error)
-			}
-			fmt.Fprintln(out)
-			for _, m := range r.Mismatches {
-				fmt.Fprintf(out, "       - %s: %s (remote=%s local=%s)\n", m.Kind, m.Ref, m.RemoteSHA, m.LocalSHA)
+		} else {
+			fmt.Fprintf(out, "=== Reference Integrity Verification (%d repositories) ===\n", len(results))
+			for _, r := range results {
+				if r.OK {
+					fmt.Fprintf(out, "[OK]   %s\n", r.Repo)
+					continue
+				}
+				fmt.Fprintf(out, "[FAIL] %s", r.Repo)
+				if r.Error != "" {
+					fmt.Fprintf(out, " (%s)", r.Error)
+				}
+				fmt.Fprintln(out)
+				for _, m := range r.Mismatches {
+					fmt.Fprintf(out, "       - %s: %s (remote=%s local=%s)\n", m.Kind, m.Ref, m.RemoteSHA, m.LocalSHA)
+				}
 			}
 		}
 	}
 
 	if !allOK {
-		return ExitPartial
+		return results, ExitPartial
 	}
-	return ExitOK
+	return results, ExitOK
 }

@@ -110,10 +110,11 @@ git-backup verify --fsck
 
 | 命令 | 说明 |
 | :--- | :--- |
+| `git-backup serve [--listen 127.0.0.1:8080]` | 启动 HTTP API、内嵌 Web 管理台、`/metrics` 与内置定时调度器 |
 | `git-backup init [flags]` | 交互/非交互初始化配置、密钥文件并校验远端可达性 |
 | `git-backup service <install\|uninstall\|status>` | 一键安装/卸载/查看 `systemd` 定时任务（支持 `--user` 无 root 运行） |
-| `git-backup sync [--config <path>]` | 执行一次完整白名单对账与镜像同步 |
-| `git-backup targets --check [--config <path>]` | 预检配置语法、远端可达性/改名与待失管清单 |
+| `git-backup sync [--repo <owner/repo>]` | 执行全量或指定单库/子集对账与镜像同步 |
+| `git-backup targets <--check\|list\|add\|remove>` | 预检配置或动态管理 `targets.json` 白名单清单 |
 | `git-backup status [--root <dir>] [--failed] [--stale 168h] [--json]` | 读取本地账本展示同步健康状态 |
 | `git-backup verify [owner/repo] [--fsck] [--json]` | 实时比对远端与本地全引用哈希一致性 |
 | `git-backup report --weekly [--config <path>]` | 读取本地账本向 Webhook 推送每周健康度周报 |
@@ -123,6 +124,27 @@ git-backup verify --fsck
 * `0`：全部成功（含跳过或全局排他锁被占用时安全退出）
 * `1`：全局致命失败（配置错误、依赖版本不足、401/403 认证异常、API 配额耗尽、磁盘空间不足）
 * `2`：部分仓库异常（主流程完成，但存在 `failed` 或远端 `missing` 仓库）
+
+---
+
+## Web 管理台与 REST API（`git-backup serve`）
+
+```bash
+# 本机回环免密启动（仅允许 127.0.0.1 / ::1 / localhost 免密）
+git-backup serve
+
+# 对外暴露监听地址时，必须设置 BACKUP_API_TOKEN，否则拒绝启动
+export BACKUP_API_TOKEN="your_strong_api_token"
+git-backup serve --listen 0.0.0.0:8080
+```
+
+* **浏览器访问**：打开 `http://127.0.0.1:8080/` 即可使用内嵌 Web 管理台（概览看板、项目增删改与单库同步/校验、异步任务进度）。
+* **动态清单持久化**：通过 Web UI、REST API 或 `git-backup targets add/remove` 修改的项目会自动保存在 `<root_dir>/targets.json`（首次启动自动从 `config.yaml` 的 `targets` 迁移导入），不破坏只读挂载的 `config.yaml`。
+* **常用 REST 接口**：
+  * `GET /api/v1/status`、`/metrics`、`/healthz`
+  * `GET/POST /api/v1/targets`、`PATCH/DELETE /api/v1/targets/{owner}/{repo}`、`POST /api/v1/targets/check`
+  * `POST /api/v1/sync`（支持 `{"repos":["owner/repo"]}` 单库同步）、`POST /api/v1/verify`、`GET /api/v1/jobs`、`GET /api/v1/jobs/{id}`
+  * 鉴权方式：请求头 `Authorization: Bearer <BACKUP_API_TOKEN>` 或通过 `POST /api/v1/session` 换取 `HttpOnly` 会话 Cookie。
 
 ---
 
@@ -167,6 +189,11 @@ services:
       GITHUB_BACKUP_TOKEN: "${GITHUB_BACKUP_TOKEN:-}"
       BACKUP_ALERT_WEBHOOK: "${BACKUP_ALERT_WEBHOOK:-}"
       BACKUP_ALERT_SECRET: "${BACKUP_ALERT_SECRET:-}"
+      # 如启用 Web/API 模式（取消下方 command 与 ports 注释），必须配置 BACKUP_API_TOKEN：
+      # BACKUP_API_TOKEN: "${BACKUP_API_TOKEN:-}"
+    # command: ["serve", "--listen", "0.0.0.0:8080"]
+    # ports:
+    #   - "127.0.0.1:8080:8080"
     volumes:
       - ./config.yaml:/etc/git-backup/config.yaml:ro
       - ./backups:/data/github-backups

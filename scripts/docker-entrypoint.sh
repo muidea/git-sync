@@ -7,6 +7,16 @@ WEEKLY_REPORT_CRON="${WEEKLY_REPORT_CRON:-}"
 RUN_ON_START="${RUN_ON_START:-true}"
 
 if [ "$#" -gt 0 ] && [ "$1" != "daemon" ]; then
+  if [ "$1" = "serve" ] && [ "${RUN_ON_START:-false}" = "true" ]; then
+    echo "Running initial git-backup sync before starting serve..."
+    set +e
+    /usr/local/bin/git-backup sync --config "${CONFIG_PATH}"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 1 ]; then
+      echo "WARNING: initial sync exited with fatal code 1; starting server anyway." >&2
+    fi
+  fi
   exec /usr/local/bin/git-backup "$@"
 fi
 

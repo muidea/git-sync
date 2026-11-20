@@ -15,6 +15,11 @@ services:
       GITHUB_BACKUP_TOKEN: "${GITHUB_BACKUP_TOKEN:-}"
       BACKUP_ALERT_WEBHOOK: "${BACKUP_ALERT_WEBHOOK:-}"
       BACKUP_ALERT_SECRET: "${BACKUP_ALERT_SECRET:-}"
+      # 若启用 Web/API 管理台（取消下方 command 与 ports 注释），必须配置 BACKUP_API_TOKEN：
+      # BACKUP_API_TOKEN: "${BACKUP_API_TOKEN:-}"
+    # command: ["serve", "--listen", "0.0.0.0:8080"]
+    # ports:
+    #   - "127.0.0.1:8080:8080"
     volumes:
       # 1. 声明式配置文件（注意内部 storage.root_dir 需为 /data/github-backups）
       - ./config.yaml:/etc/git-backup/config.yaml:ro

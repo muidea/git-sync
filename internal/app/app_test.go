@@ -268,8 +268,23 @@ observability:
 		t.Fatalf("expected recovery webhook event, got %+v", webhookEvents[len(webhookEvents)-1])
 	}
 
-	// Test targets --check with adopt removed from whitelist
-	cfg.Targets = cfg.Targets[:2]
+	// Test single-repo sync does not mark other targets unmanaged
+	singleRes := RunSyncWithOptions(ctx, cfg, logger, SyncOptions{RepoFilter: []string{"muidea/alpha"}}, hooks)
+	if singleRes.ExitCode != ExitOK || singleRes.Summary.Counts.ManagedTotal != 3 || singleRes.Summary.Counts.Unmanaged != 0 {
+		t.Fatalf("unexpected single-repo sync result: %+v", singleRes)
+	}
+
+	// Test targets --check with adopt removed from targets.json
+	tf, _, err := ledger.LoadOrMigrateTargets(backupRoot, cfg.Targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, removed, rErr := tf.Remove("muidea/adopt"); rErr != nil || !removed {
+		t.Fatalf("failed removing adopt from targets.json: removed=%v err=%v", removed, rErr)
+	}
+	if err := ledger.SaveTargets(backupRoot, tf); err != nil {
+		t.Fatal(err)
+	}
 	var targetsOut bytes.Buffer
 	if code := RunTargetsCheck(ctx, cfg, &targetsOut, hooks); code != ExitOK {
 		t.Fatalf("RunTargetsCheck expected ExitOK, got %d\n%s", code, targetsOut.String())

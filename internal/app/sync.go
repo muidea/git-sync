@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/muidea/git-backup/internal/auth"
@@ -42,14 +43,32 @@ type syncTaskOutcome struct {
 	errMsg     string
 }
 
+// SyncOptions customizes a sync run (optional repository filter and progress callback).
+type SyncOptions struct {
+	RepoFilter []string
+	ProgressFn func(completed, total int, currentRepo string)
+}
+
+// SyncResult captures the outcome of RunSyncWithOptions.
+type SyncResult struct {
+	ExitCode   int
+	Summary    *ledger.StatusSummary
+	FatalError string
+}
+
 // RunSync executes the end-to-end backup workflow and returns exit code 0, 1, or 2.
 func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks *Hooks) int {
+	return RunSyncWithOptions(ctx, cfg, logger, SyncOptions{}, hooks).ExitCode
+}
+
+// RunSyncWithOptions executes a full or filtered sync run and returns detailed results.
+func RunSyncWithOptions(ctx context.Context, cfg *config.Config, logger *slog.Logger, opts SyncOptions, hooks *Hooks) SyncResult {
 	startedAt := currentTime(hooks)
 	runID := startedAt.Format("20060102-150405")
 	redactor := auth.NewRedactor()
 	webhook := notify.NewWebhookSender(cfg.Observability.Alert, cfg.Network.ProxyURL, redactor)
 
-	failFatal := func(msg string, err error) int {
+	failFatal := func(msg string, err error) SyncResult {
 		full := msg
 		if err != nil {
 			full = fmt.Sprintf("%s: %s", msg, redactor.Redact(err.Error()))
@@ -61,14 +80,14 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 			Message:   full,
 			Timestamp: currentTime(hooks),
 		})
-		return ExitFatal
+		return SyncResult{ExitCode: ExitFatal, FatalError: full}
 	}
 
 	lock, err := ledger.AcquireLock(cfg.Storage.RootDir)
 	if err != nil {
 		if errors.Is(err, ledger.ErrLockBusy) {
 			logger.Info("another git-backup instance holds .backup.lock, exiting safely", "root_dir", cfg.Storage.RootDir)
-			return ExitOK
+			return SyncResult{ExitCode: ExitOK}
 		}
 		return failFatal("acquire backup lock failed", err)
 	}
@@ -106,7 +125,22 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 		return failFatal("load repo_ledger.json failed", err)
 	}
 
-	targets := cfg.ResolveTargets()
+	targetsFile, _, err := ledger.LoadOrMigrateTargets(cfg.Storage.RootDir, cfg.Targets)
+	if err != nil {
+		return failFatal("load targets.json failed", err)
+	}
+	allTargets := cfg.ResolveTargetList(targetsFile.Targets)
+
+	targets := allTargets
+	isFiltered := len(opts.RepoFilter) > 0
+	if isFiltered {
+		var filterErr error
+		targets, filterErr = filterResolvedTargets(allTargets, opts.RepoFilter)
+		if filterErr != nil {
+			return failFatal("invalid repository filter", filterErr)
+		}
+	}
+
 	metas, err := ghClient.FetchMetadata(ctx, targets, repLedger, cfg.Sync.Concurrency, cfg.Sync.MaxRetries)
 	if err != nil {
 		return failFatal("fetch GitHub metadata failed", err)
@@ -115,7 +149,7 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 	now := currentTime(hooks)
 	activeKeys := make(map[string]struct{}, len(metas))
 	activeNames := make(map[string]struct{}, len(metas))
-	for _, t := range targets {
+	for _, t := range allTargets {
 		activeNames[t.CanonicalKey] = struct{}{}
 	}
 	for _, m := range metas {
@@ -127,8 +161,10 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 		}
 	}
 
-	// 1. Reconcile unmanaged repositories removed from targets whitelist.
-	reconcileUnmanaged(cfg, repLedger, activeKeys, activeNames, now, logger)
+	// 1. Reconcile unmanaged repositories only on full sync runs.
+	if !isFiltered {
+		reconcileUnmanaged(cfg, repLedger, activeKeys, activeNames, now, logger)
+	}
 
 	// 2. Reconcile whitelisted repositories into skip, missing, failed, or worker tasks.
 	var tasks []syncTask
@@ -266,7 +302,15 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 	}
 
 	// 3. Execute sync tasks concurrently in bounded Worker Pool.
-	outcomes := runWorkerPool(ctx, cfg, tp, redactor, tasks, logger)
+	preCompleted := len(metas) - len(tasks)
+	if opts.ProgressFn != nil {
+		opts.ProgressFn(preCompleted, len(metas), "")
+	}
+	outcomes := runWorkerPool(ctx, cfg, tp, redactor, tasks, logger, func(done int, repo string) {
+		if opts.ProgressFn != nil {
+			opts.ProgressFn(preCompleted+done, len(metas), repo)
+		}
+	})
 	for _, oc := range outcomes {
 		rec := oc.task.record
 		wasAlerted := rec.LastAlertAt != nil && !rec.LastAlertAt.IsZero()
@@ -327,7 +371,6 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 		case ledger.StatusUnmanaged:
 			unmanagedCount++
 		case ledger.StatusFailed, ledger.StatusMissing:
-			// Include only repositories in current targets (or missing placeholder).
 			abnormal = append(abnormal, ledger.AbnormalReport{
 				Repo:                rec.FullName,
 				State:               rec.State,
@@ -337,6 +380,11 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 		}
 	}
 	sort.Slice(abnormal, func(i, j int) bool { return abnormal[i].Repo < abnormal[j].Repo })
+
+	if isFiltered {
+		// Recompute global counts across all targets so status_summary.json stays globally consistent.
+		clonedCount, updatedCount, upToDateCount, failedCount, missingCount = countAcrossTargets(allTargets, repLedger, metas, outcomes)
+	}
 
 	managedTotal := clonedCount + updatedCount + upToDateCount + failedCount + missingCount
 	exitCode := ExitOK
@@ -348,7 +396,7 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 	if minBulkMissing < 2 {
 		minBulkMissing = 2
 	}
-	bulkMissing := managedTotal > 0 && missingCount >= minBulkMissing
+	bulkMissing := managedTotal > 0 && missingCount >= minBulkMissing && !isFiltered
 
 	summary := &ledger.StatusSummary{
 		SchemaVersion:             ledger.SchemaVersion,
@@ -444,7 +492,7 @@ func RunSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, hooks
 		"missing", missingCount,
 		"unmanaged", unmanagedCount,
 	)
-	return exitCode
+	return SyncResult{ExitCode: exitCode, Summary: summary}
 }
 
 func reconcileUnmanaged(
@@ -587,6 +635,80 @@ func shouldSkipUnchanged(meta github.RepoMeta, rec *ledger.RepoRecord, forceDays
 	return true
 }
 
+func filterResolvedTargets(all []config.ResolvedTarget, filter []string) ([]config.ResolvedTarget, error) {
+	byKey := make(map[string]config.ResolvedTarget, len(all))
+	for _, t := range all {
+		byKey[t.CanonicalKey] = t
+	}
+	seen := make(map[string]struct{}, len(filter))
+	out := make([]config.ResolvedTarget, 0, len(filter))
+	for _, raw := range filter {
+		norm, err := config.NormalizeRepoName(raw)
+		if err != nil {
+			return nil, err
+		}
+		key := strings.ToLower(norm)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		t, ok := byKey[key]
+		if !ok {
+			return nil, fmt.Errorf("repository %q is not in targets whitelist", norm)
+		}
+		seen[key] = struct{}{}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+func countAcrossTargets(all []config.ResolvedTarget, l *ledger.RepoLedger, runMetas []github.RepoMeta, outcomes []syncTaskOutcome) (cloned, updated, upToDate, failed, missing int) {
+	runStatusByKey := make(map[string]ledger.RepoStatus, len(runMetas))
+	for _, m := range runMetas {
+		switch m.State {
+		case github.MetaMissing:
+			runStatusByKey[m.Target.CanonicalKey] = ledger.StatusMissing
+		case github.MetaError:
+			runStatusByKey[m.Target.CanonicalKey] = ledger.StatusFailed
+		case github.MetaOK, github.MetaNotModified:
+			runStatusByKey[m.Target.CanonicalKey] = ledger.StatusUpToDate
+		}
+	}
+	for _, oc := range outcomes {
+		runStatusByKey[oc.task.meta.Target.CanonicalKey] = oc.finalState
+	}
+
+	for _, t := range all {
+		if st, ok := runStatusByKey[t.CanonicalKey]; ok {
+			switch st {
+			case ledger.StatusCloned:
+				cloned++
+			case ledger.StatusUpdated:
+				updated++
+			case ledger.StatusUpToDate:
+				upToDate++
+			case ledger.StatusFailed:
+				failed++
+			case ledger.StatusMissing:
+				missing++
+			}
+			continue
+		}
+		rec := l.FindByFullName(t.Repo)
+		if rec == nil {
+			continue
+		}
+		switch rec.State {
+		case ledger.StatusCloned, ledger.StatusUpdated, ledger.StatusUpToDate:
+			upToDate++
+		case ledger.StatusFailed:
+			failed++
+		case ledger.StatusMissing:
+			missing++
+		}
+	}
+	return
+}
+
 func runWorkerPool(
 	ctx context.Context,
 	cfg *config.Config,
@@ -594,6 +716,7 @@ func runWorkerPool(
 	redactor *auth.Redactor,
 	tasks []syncTask,
 	logger *slog.Logger,
+	onDone func(done int, repo string),
 ) []syncTaskOutcome {
 	if len(tasks) == 0 {
 		return nil
@@ -613,6 +736,7 @@ func runWorkerPool(
 		workers = len(tasks)
 	}
 
+	var completed atomic.Int32
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -620,6 +744,10 @@ func runWorkerPool(
 			defer wg.Done()
 			for idx := range jobs {
 				outcomes[idx] = executeSyncTask(ctx, cfg, tp, redactor, tasks[idx], logger)
+				n := int(completed.Add(1))
+				if onDone != nil {
+					onDone(n, tasks[idx].meta.Target.Repo)
+				}
 			}
 		}()
 	}

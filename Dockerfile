@@ -21,6 +21,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh && mkdir -p /etc/git-backup /da
 
 ENV GIT_BACKUP_CONFIG=/etc/git-backup/config.yaml
 
+EXPOSE 8080
 VOLUME ["/data/github-backups"]
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["daemon"]

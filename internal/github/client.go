@@ -97,6 +97,9 @@ func (c *Client) FetchMetadata(
 	concurrency int,
 	maxRetries int,
 ) ([]RepoMeta, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
 	var results []RepoMeta
 	var err error
 	if len(targets) <= restRoutingThreshold {

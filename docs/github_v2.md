@@ -448,3 +448,72 @@ observability:
    * 开启 `Persistent=true`，保障宿主机断电维护重启后自动补齐错过的备份任务。
 3. **周报定时单元（可选，`git-backup-report.timer`）**：
    * 配置 `OnCalendar=Mon *-*-* 09:00:00`，拉起 `git-backup report --weekly --config /etc/git-backup/config.yaml` 推送全局健康度周报。
+
+---
+
+## 9. API 接口与轻量 Web 管理台设计（v2.1 扩展）
+
+为支持通过 HTTP 接口和浏览器对备份项目进行动态管理、手动触发单库同步与实时观测状态，系统在保留原有无状态 CLI 能力的基础上，新增 **`git-backup serve`** 控制面常驻模式。
+
+### 9.1 架构演进与数据源解耦
+
+1. **静态配置与动态清单分离**：
+   * `config.yaml` 保持为**只读基础设施配置**（`storage`、`auth`、`defaults`、`sync`、`network`、`safety`、`observability`、`server`），适配 Docker `:ro` 只读挂载。
+   * 动态纳管项目清单独立存储为 `<root_dir>/targets.json`（使用原子写 `WriteFileAtomic` 持久化，受进程内读写锁及全局 `.backup.lock` 保护）。
+   * **平滑迁移兼容**：首次启动若 `<root_dir>/targets.json` 不存在且 `config.yaml` 中定义了 `targets:`，自动将其迁移导入 `targets.json`；后续由 API / Web UI / `targets add|remove` 统一维护 `targets.json`。
+2. **CLI 与服务模式共存**：
+   * 新增 `git-backup serve [--config <path>] [--listen <addr>]`：内置定时调度器（按周期自动入队全量 `sync` 与周报）、异步任务队列（`JobManager`）、REST API、`/metrics` 与内嵌 Web UI。
+   * 同步扩展 CLI：`git-backup sync --repo owner/name` 支持单库同步；`git-backup targets add/remove/list` 支持命令行直接管理 `targets.json`。
+   * 服务模式与外部手动 CLI 共用 `.backup.lock`（`flock`），确保任何时刻不会并发写入同一个本地裸仓库。
+
+### 9.2 安全鉴权与网络边界（核心红线）
+
+* **回环免密限制（强制校验）**：
+  * `server.listen` 默认为 **`127.0.0.1:8080`**。
+  * 若环境变量 `BACKUP_API_TOKEN`（由 `server.api_token_env` 指定）**非空**：无论监听地址为何，除 `/healthz` 与静态页面外，所有 `/api/v1/*` 与 `/metrics` 接口均强制校验凭证。
+  * 若 `BACKUP_API_TOKEN` **为空**：**仅允许绑定回环地址（`127.0.0.1`、`::1` 或 `localhost`）时免密运行**，启动时打印 `WARN` 日志，且服务端额外校验请求 `RemoteAddr` 为回环地址并校对 `Host`/`Origin` 防 DNS 重绑定；**若绑定任何非回环地址（如 `0.0.0.0:8080`）且未配置 Token，进程直接拒绝启动并返回退出码 `1`**。
+* **双模鉴权机制**：
+  * **脚本 / API 调用**：请求头携带 `Authorization: Bearer <token>`（使用常量时间比对 `subtle.ConstantTimeCompare`）。
+  * **浏览器 Web UI**：通过 `POST /api/v1/session` 提交 Token 校验成功后，后端签发内存态 `HttpOnly; SameSite=Strict` 会话 Cookie（不把 Token 写入 `localStorage`）。
+* **绝对脱敏**：接口响应严禁返回 GitHub PAT、GitHub App 私钥、Webhook URL/Secret 或代理密码；基础配置仅展示脱敏只读摘要。
+* **只增不删安全底线**：通过接口 `DELETE /api/v1/targets/{owner}/{repo}` 仅将项目移出白名单并按 `unmanaged_policy` 标记为 `unmanaged`（默认原地保留），不提供直接物理删库接口。
+
+### 9.3 REST API 接口契约
+
+| 分组 | 方法与路径 | 说明 |
+| :--- | :--- | :--- |
+| **会话鉴权** | `GET /api/v1/session` | 查询当前鉴权状态（`auth_required`、`authenticated`） |
+| | `POST /api/v1/session` | 校验 `{"token": "..."}` 并下发 `HttpOnly` 会话 Cookie |
+| | `DELETE /api/v1/session` | 注销当前浏览器会话 |
+| **系统状态** | `GET /api/v1/status` | 返回最新 `status_summary.json`、磁盘空间（总/已用/剩余%）、调度器下次运行时间及脱敏配置摘要 |
+| | `GET /metrics` | 实时输出 Prometheus 指标（兼容无需 `node_exporter` textfile） |
+| | `GET /healthz` | 无鉴权存活探针 |
+| **项目管理** | `GET /api/v1/targets` | 聚合 `targets.json` 与 `repo_ledger.json` 状态（支持 `?state=`、`?q=` 过滤） |
+| | `POST /api/v1/targets` | 新增项目（自动规范化 Git URL/`owner/repo`，支持覆盖项、`?check=true` 与 `?sync_now=true`） |
+| | `PATCH /api/v1/targets/{owner}/{repo}` | 更新单库覆盖策略（`enable_lfs`、`mirror_pr_refs`、`skip_unchanged`、超时） |
+| | `DELETE /api/v1/targets/{owner}/{repo}` | 移出白名单转为 `unmanaged`（按 `unmanaged_policy` 保留或归档） |
+| | `POST /api/v1/targets/check` | 触发白名单可达性与改名预检，返回结构化结果 |
+| | `GET /api/v1/repos/{owner}/{repo}` | 查询单库账本详情、最近错误及本地引用概览 |
+| **异步任务** | `POST /api/v1/sync` | 触发全量或指定子集同步（`{"repos": ["muidea/magicRunner"]}`），返回 `202` + `job_id`；运行中返回 `409` |
+| | `POST /api/v1/verify` | 触发全量或指定仓库一致性校验（`{"repos": [...], "fsck": true}`），返回 `202` + `job_id` |
+| | `GET /api/v1/jobs` | 查询最近异步任务列表 |
+| | `GET /api/v1/jobs/{job_id}` | 查询单次任务状态（`running \| succeeded \| partial_failure \| failed`）、进度与单库明细 |
+
+### 9.4 轻量内嵌 Web 管理台（`embed.FS`）
+
+* **零前端构建依赖**：采用原生 HTML5 + CSS + 原生 ES Module JS，通过 Go `//go:embed` 直接内嵌进单一 `git-backup` 二进制，无需 Node.js 构建链，维持原有轻量镜像体积。
+* **核心页面视图**：
+  1. **概览看板（Dashboard）**：纳管/健康/失败/缺失/失管计数卡片、磁盘空间进度条、调度倒计时、一键“全量同步/全量校验”按钮、置顶异常仓库告警与一键单库重试。
+  2. **项目管理（Targets）**：状态筛选与搜索、粘贴 Git URL/仓库名添加弹窗（支持先校验再添加、添加后立即拉取）、行内单库 `Sync` / `Verify` / `Edit` / `Remove` 操作。
+  3. **任务记录（Jobs）**：实时轮询查看运行中任务进度及历史同步/校验结果明细。
+
+### 9.5 配置扩展（`config.yaml` 新增 `server` 段）
+
+```yaml
+server:
+  listen: "127.0.0.1:8080"      # 非回环地址（如 0.0.0.0:8080）强制要求设置 api_token_env 对应环境变量
+  api_token_env: "BACKUP_API_TOKEN"
+  ui_enabled: true              # 是否挂载内嵌 Web 管理台
+  sync_interval: "4h"           # serve 模式定时同步周期（"0" 表示仅手动/API 触发）
+  weekly_report_cron: "MON 09:00" # serve 模式下内置周报触发时间（为空则禁用内置周报）
+```

@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>git-backup 控制面板</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-title">git-backup</span>
+      <span class="badge badge-muted" id="authBadge">检查中...</span>
+    </div>
+    <nav class="tabs" id="navTabs">
+      <button class="tab active" data-tab="dashboard">概览看板</button>
+      <button class="tab" data-tab="targets">项目管理</button>
+      <button class="tab" data-tab="jobs">任务记录</button>
+      <button class="tab" data-tab="config">运行配置</button>
+    </nav>
+    <div class="topbar-actions">
+      <button class="btn btn-primary" id="btnSyncAll">立即全量同步</button>
+      <button class="btn btn-secondary" id="btnVerifyAll">全量校验</button>
+      <button class="btn btn-ghost hidden" id="btnLogout">退出</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="activeJobBanner" class="banner banner-info hidden"></div>
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- Dashboard -->
+    <section id="tab-dashboard" class="tab-panel active">
+      <div class="kpi-grid" id="kpiGrid"></div>
+
+      <div class="two-col">
+        <div class="card">
+          <h3>存储与磁盘空间</h3>
+          <div id="diskPanel" class="panel-body">加载中...</div>
+        </div>
+        <div class="card">
+          <h3>调度与运行摘要</h3>
+          <div id="schedulerPanel" class="panel-body">加载中...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3>异常仓库（Failed / Missing）</h3>
+        </div>
+        <div id="abnormalPanel" class="panel-body">加载中...</div>
+      </div>
+    </section>
+
+    <!-- Targets -->
+    <section id="tab-targets" class="tab-panel">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <input type="text" id="targetSearch" class="input" placeholder="搜索仓库名 owner/repo..." />
+          <div class="pill-group" id="stateFilterGroup">
+            <button class="pill active" data-filter="all">全部</button>
+            <button class="pill" data-filter="healthy">正常</button>
+            <button class="pill" data-filter="failed">失败</button>
+            <button class="pill" data-filter="missing">缺失</button>
+            <button class="pill" data-filter="unmanaged">失管</button>
+          </div>
+        </div>
+        <div class="toolbar-right">
+          <button class="btn btn-secondary" id="btnPreflightAll">全部预检</button>
+          <button class="btn btn-primary" id="btnOpenAddTarget">+ 添加项目</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>仓库</th>
+                <th>状态</th>
+                <th>HEAD</th>
+                <th>上次同步</th>
+                <th>磁盘占用</th>
+                <th>策略 (LFS / PR / 跳过)</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="targetsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Jobs -->
+    <section id="tab-jobs" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h3>最近任务</h3>
+          <button class="btn btn-ghost" id="btnRefreshJobs">刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Job ID</th>
+                <th>类型</th>
+                <th>触发方式</th>
+                <th>状态</th>
+                <th>进度</th>
+                <th>开始时间</th>
+                <th>耗时</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody id="jobsBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="jobDetailCard" class="card hidden">
+        <div class="card-header">
+          <h3 id="jobDetailTitle">任务详情</h3>
+          <button class="btn btn-ghost" id="btnCloseJobDetail">关闭</button>
+        </div>
+        <pre id="jobDetailPre" class="code-box"></pre>
+      </div>
+    </section>
+
+    <!-- Config -->
+    <section id="tab-config" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h3>运行参数摘要（脱敏只读）</h3>
+        </div>
+        <pre id="configPre" class="code-box">加载中...</pre>
+      </div>
+    </section>
+  </main>
+
+  <!-- Add Target Modal -->
+  <div id="addTargetModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>添加备份项目</h3>
+        <button class="btn btn-ghost modal-close" data-close="addTargetModal">&times;</button>
+      </div>
+      <form id="addTargetForm">
+        <label class="field">
+          <span>仓库名称或 Git 地址</span>
+          <input type="text" id="addRepoInput" class="input" required placeholder="例如 muidea/magicRunner 或 git@github.com:muidea/magicRunner.git" />
+        </label>
+        <div class="form-grid">
+          <label class="field">
+            <span>Git LFS</span>
+            <select id="addLFS" class="input">
+              <option value="">跟随全局默认</option>
+              <option value="auto">auto</option>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>镜像 PR 引用 (refs/pull/*)</span>
+            <select id="addMirrorPR" class="input">
+              <option value="">跟随全局默认</option>
+              <option value="true">开启</option>
+              <option value="false">关闭</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Clone 超时 (可选)</span>
+            <input type="text" id="addCloneTimeout" class="input" placeholder="如 2h" />
+          </label>
+          <label class="field">
+            <span>Update 超时 (可选)</span>
+            <input type="text" id="addUpdateTimeout" class="input" placeholder="如 30m" />
+          </label>
+        </div>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="addCheckRemote" checked /> 添加前校验远端可达性</label>
+          <label><input type="checkbox" id="addSyncNow" checked /> 添加后立即同步该库</label>
+        </div>
+        <div id="addTargetError" class="error-text hidden"></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost modal-close" data-close="addTargetModal">取消</button>
+          <button type="submit" class="btn btn-primary">确认添加</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Edit Target Modal -->
+  <div id="editTargetModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="editModalTitle">编辑策略</h3>
+        <button class="btn btn-ghost modal-close" data-close="editTargetModal">&times;</button>
+      </div>
+      <form id="editTargetForm">
+        <input type="hidden" id="editRepoName" />
+        <div class="form-grid">
+          <label class="field">
+            <span>Git LFS</span>
+            <select id="editLFS" class="input">
+              <option value="default">跟随全局默认</option>
+              <option value="auto">auto</option>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>镜像 PR 引用</span>
+            <select id="editMirrorPR" class="input">
+              <option value="default">跟随全局默认</option>
+              <option value="true">开启</option>
+              <option value="false">关闭</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>无变更跳过</span>
+            <select id="editSkipUnchanged" class="input">
+              <option value="default">跟随全局默认</option>
+              <option value="true">开启</option>
+              <option value="false">强制同步</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Update 超时</span>
+            <input type="text" id="editUpdateTimeout" class="input" placeholder="如 30m (留空不变)" />
+          </label>
+        </div>
+        <div id="editTargetError" class="error-text hidden"></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost modal-close" data-close="editTargetModal">取消</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Repo Detail Modal -->
+  <div id="repoDetailModal" class="modal hidden">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <h3 id="repoDetailTitle">仓库详情</h3>
+        <button class="btn btn-ghost modal-close" data-close="repoDetailModal">&times;</button>
+      </div>
+      <pre id="repoDetailPre" class="code-box"></pre>
+    </div>
+  </div>
+
+  <!-- Login Modal -->
+  <div id="loginModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>身份验证</h3>
+      </div>
+      <form id="loginForm">
+        <p class="muted">当前服务启用了接口访问令牌（BACKUP_API_TOKEN），请输入令牌以继续。</p>
+        <label class="field">
+          <span>API Token</span>
+          <input type="password" id="loginTokenInput" class="input" required placeholder="输入 BACKUP_API_TOKEN" />
+        </label>
+        <div id="loginError" class="error-text hidden"></div>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary">登录</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>

@@ -228,6 +228,11 @@ func RunInit(ctx context.Context, opts InitOptions, out io.Writer, hooks *Hooks)
 		return ExitFatal
 	}
 
+	if _, _, err := ledger.LoadOrMigrateTargets(opts.RootDir, cfg.Targets); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: seed targets.json: %v\n", err)
+		return ExitFatal
+	}
+
 	// 5. Preflight targets check unless skipped.
 	if !opts.SkipCheck {
 		if opts.AuthMode == "pat" && strings.TrimSpace(os.Getenv(opts.TokenEnv)) == "" {

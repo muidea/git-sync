@@ -56,3 +56,10 @@ observability:
     webhook_secret_env: ""
     failure_threshold: 2
     alert_cooldown: "24h"
+
+server:
+  listen: "127.0.0.1:8080"      # 绑定非回环地址（如 0.0.0.0:8080）时必须设置 BACKUP_API_TOKEN
+  api_token_env: "BACKUP_API_TOKEN"
+  ui_enabled: true
+  sync_interval: "4h"           # serve 模式内置定时同步周期（"0" 表示禁用内置定时）
+  weekly_report_cron: ""        # 可选，例如 "MON 09:00"

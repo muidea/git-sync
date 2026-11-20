@@ -21,12 +21,8 @@ import (
 	"github.com/muidea/git-backup/internal/ledger"
 )
 
-// WritePrometheus atomically writes Prometheus textfile collector metrics.
-func WritePrometheus(path string, summary *ledger.StatusSummary, l *ledger.RepoLedger) error {
-	if strings.TrimSpace(path) == "" || summary == nil {
-		return nil
-	}
-
+// FormatPrometheus renders Prometheus exposition metrics from summary and ledger.
+func FormatPrometheus(summary *ledger.StatusSummary, l *ledger.RepoLedger) []byte {
 	var totalBytes int64
 	if l != nil {
 		for _, rec := range l.Repositories {
@@ -35,28 +31,37 @@ func WritePrometheus(path string, summary *ledger.StatusSummary, l *ledger.RepoL
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString("# HELP git_backup_last_run_timestamp_seconds Unix timestamp of the last backup run completion.\n")
-	buf.WriteString("# TYPE git_backup_last_run_timestamp_seconds gauge\n")
-	fmt.Fprintf(&buf, "git_backup_last_run_timestamp_seconds %d\n", summary.FinishedAt.Unix())
+	if summary != nil {
+		buf.WriteString("# HELP git_backup_last_run_timestamp_seconds Unix timestamp of the last backup run completion.\n")
+		buf.WriteString("# TYPE git_backup_last_run_timestamp_seconds gauge\n")
+		fmt.Fprintf(&buf, "git_backup_last_run_timestamp_seconds %d\n", summary.FinishedAt.Unix())
 
-	buf.WriteString("# HELP git_backup_duration_seconds Duration of the last backup run in seconds.\n")
-	buf.WriteString("# TYPE git_backup_duration_seconds gauge\n")
-	fmt.Fprintf(&buf, "git_backup_duration_seconds %.3f\n", float64(summary.DurationMS)/1000.0)
+		buf.WriteString("# HELP git_backup_duration_seconds Duration of the last backup run in seconds.\n")
+		buf.WriteString("# TYPE git_backup_duration_seconds gauge\n")
+		fmt.Fprintf(&buf, "git_backup_duration_seconds %.3f\n", float64(summary.DurationMS)/1000.0)
 
-	buf.WriteString("# HELP git_backup_repos_total Number of repositories by state in the last run.\n")
-	buf.WriteString("# TYPE git_backup_repos_total gauge\n")
-	fmt.Fprintf(&buf, "git_backup_repos_total{status=\"cloned\"} %d\n", summary.Counts.Cloned)
-	fmt.Fprintf(&buf, "git_backup_repos_total{status=\"updated\"} %d\n", summary.Counts.Updated)
-	fmt.Fprintf(&buf, "git_backup_repos_total{status=\"up_to_date\"} %d\n", summary.Counts.UpToDate)
-	fmt.Fprintf(&buf, "git_backup_repos_total{status=\"failed\"} %d\n", summary.Counts.Failed)
-	fmt.Fprintf(&buf, "git_backup_repos_total{status=\"missing\"} %d\n", summary.Counts.Missing)
-	fmt.Fprintf(&buf, "git_backup_repos_total{status=\"unmanaged\"} %d\n", summary.Counts.Unmanaged)
+		buf.WriteString("# HELP git_backup_repos_total Number of repositories by state in the last run.\n")
+		buf.WriteString("# TYPE git_backup_repos_total gauge\n")
+		fmt.Fprintf(&buf, "git_backup_repos_total{status=\"cloned\"} %d\n", summary.Counts.Cloned)
+		fmt.Fprintf(&buf, "git_backup_repos_total{status=\"updated\"} %d\n", summary.Counts.Updated)
+		fmt.Fprintf(&buf, "git_backup_repos_total{status=\"up_to_date\"} %d\n", summary.Counts.UpToDate)
+		fmt.Fprintf(&buf, "git_backup_repos_total{status=\"failed\"} %d\n", summary.Counts.Failed)
+		fmt.Fprintf(&buf, "git_backup_repos_total{status=\"missing\"} %d\n", summary.Counts.Missing)
+		fmt.Fprintf(&buf, "git_backup_repos_total{status=\"unmanaged\"} %d\n", summary.Counts.Unmanaged)
+	}
 
 	buf.WriteString("# HELP git_backup_storage_bytes_total Total disk bytes used across tracked repositories.\n")
 	buf.WriteString("# TYPE git_backup_storage_bytes_total gauge\n")
 	fmt.Fprintf(&buf, "git_backup_storage_bytes_total %d\n", totalBytes)
+	return buf.Bytes()
+}
 
-	return ledger.WriteFileAtomic(path, buf.Bytes(), 0o644)
+// WritePrometheus atomically writes Prometheus textfile collector metrics.
+func WritePrometheus(path string, summary *ledger.StatusSummary, l *ledger.RepoLedger) error {
+	if strings.TrimSpace(path) == "" || summary == nil {
+		return nil
+	}
+	return ledger.WriteFileAtomic(path, FormatPrometheus(summary, l), 0o644)
 }
 
 // AlertPayload represents an outgoing webhook notification.

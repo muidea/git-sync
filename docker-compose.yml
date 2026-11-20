@@ -12,6 +12,7 @@ services:
       GITHUB_BACKUP_TOKEN: "${GITHUB_BACKUP_TOKEN:-}"
       BACKUP_ALERT_WEBHOOK: "${BACKUP_ALERT_WEBHOOK:-}"
       BACKUP_ALERT_SECRET: "${BACKUP_ALERT_SECRET:-}"
+      BACKUP_API_TOKEN: "${BACKUP_API_TOKEN:-}"
     volumes:
       - ./config.yaml:/etc/git-backup/config.yaml:ro
       - ./backups:/data/github-backups

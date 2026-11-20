@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/muidea/git-backup/internal/app"
 	"github.com/muidea/git-backup/internal/config"
+	"github.com/muidea/git-backup/internal/server"
 )
 
 var version = "2.0.0"
@@ -33,6 +35,8 @@ func run(args []string) int {
 	rest := args[1:]
 
 	switch sub {
+	case "serve":
+		return cmdServe(ctx, rest)
 	case "init":
 		return cmdInit(ctx, rest)
 	case "service":
@@ -143,9 +147,42 @@ func cmdService(ctx context.Context, args []string) int {
 	}
 }
 
+func cmdServe(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	cfgFlag := fs.String("config", "", "Path to config.yaml")
+	listenFlag := fs.String("listen", "", "HTTP listen address (overrides server.listen)")
+	if err := fs.Parse(args); err != nil {
+		return app.ExitFatal
+	}
+	cfg, code := loadConfigOrFail(*cfgFlag)
+	if code != app.ExitOK {
+		return code
+	}
+	if strings.TrimSpace(*listenFlag) != "" {
+		cfg.Server.Listen = strings.TrimSpace(*listenFlag)
+		if err := cfg.Validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: invalid --listen: %v\n", err)
+			return app.ExitFatal
+		}
+	}
+
+	logger := app.NewLogger(cfg.Observability, os.Stderr)
+	srv, err := server.New(cfg, logger, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		return app.ExitFatal
+	}
+	if err := srv.Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: server exited with error: %v\n", err)
+		return app.ExitFatal
+	}
+	return app.ExitOK
+}
+
 func cmdSync(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	cfgFlag := fs.String("config", "", "Path to config.yaml")
+	repoFlag := fs.String("repo", "", "Optional comma-separated repository subset to sync")
 	if err := fs.Parse(args); err != nil {
 		return app.ExitFatal
 	}
@@ -154,10 +191,79 @@ func cmdSync(ctx context.Context, args []string) int {
 		return code
 	}
 	logger := app.NewLogger(cfg.Observability, os.Stderr)
-	return app.RunSync(ctx, cfg, logger, nil)
+	var filter []string
+	for _, part := range strings.Split(*repoFlag, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			filter = append(filter, p)
+		}
+	}
+	return app.RunSyncWithOptions(ctx, cfg, logger, app.SyncOptions{RepoFilter: filter}, nil).ExitCode
 }
 
 func cmdTargets(ctx context.Context, args []string) int {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub := args[0]
+		rest := args[1:]
+		switch sub {
+		case "list":
+			fs := flag.NewFlagSet("targets list", flag.ContinueOnError)
+			cfgFlag := fs.String("config", "", "Path to config.yaml")
+			if err := fs.Parse(rest); err != nil {
+				return app.ExitFatal
+			}
+			cfg, code := loadConfigOrFail(*cfgFlag)
+			if code != app.ExitOK {
+				return code
+			}
+			return app.RunTargetsList(cfg, os.Stdout)
+		case "add":
+			fs := flag.NewFlagSet("targets add", flag.ContinueOnError)
+			cfgFlag := fs.String("config", "", "Path to config.yaml")
+			checkFlag := fs.Bool("check", true, "Verify remote reachability before adding")
+			lfsFlag := fs.String("lfs", "", "Override enable_lfs (auto|true|false)")
+			noPRRefs := fs.Bool("no-pr-refs", false, "Disable mirroring refs/pull/*")
+			if err := fs.Parse(rest); err != nil {
+				return app.ExitFatal
+			}
+			if fs.NArg() == 0 {
+				fmt.Fprintln(os.Stderr, "Usage: git-backup targets add <owner/repo|url> [--config <path>] [--check=true]")
+				return app.ExitFatal
+			}
+			cfg, code := loadConfigOrFail(*cfgFlag)
+			if code != app.ExitOK {
+				return code
+			}
+			tc := config.TargetConfig{Repo: fs.Arg(0)}
+			if *lfsFlag != "" {
+				mode := config.LFSMode(strings.ToLower(strings.TrimSpace(*lfsFlag)))
+				tc.EnableLFS = &mode
+			}
+			if *noPRRefs {
+				f := false
+				tc.MirrorPRRefs = &f
+			}
+			return app.RunTargetsAdd(ctx, cfg, tc, *checkFlag, os.Stdout, nil)
+		case "remove", "rm":
+			fs := flag.NewFlagSet("targets remove", flag.ContinueOnError)
+			cfgFlag := fs.String("config", "", "Path to config.yaml")
+			if err := fs.Parse(rest); err != nil {
+				return app.ExitFatal
+			}
+			if fs.NArg() == 0 {
+				fmt.Fprintln(os.Stderr, "Usage: git-backup targets remove <owner/repo> [--config <path>]")
+				return app.ExitFatal
+			}
+			cfg, code := loadConfigOrFail(*cfgFlag)
+			if code != app.ExitOK {
+				return code
+			}
+			return app.RunTargetsRemove(cfg, fs.Arg(0), os.Stdout)
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown targets action %q (expected list, add, remove, or --check)\n", sub)
+			return app.ExitFatal
+		}
+	}
+
 	fs := flag.NewFlagSet("targets", flag.ContinueOnError)
 	cfgFlag := fs.String("config", "", "Path to config.yaml")
 	checkFlag := fs.Bool("check", false, "Verify whitelist rules and remote reachability without modifying disk")
@@ -165,7 +271,7 @@ func cmdTargets(ctx context.Context, args []string) int {
 		return app.ExitFatal
 	}
 	if !*checkFlag {
-		fmt.Fprintln(os.Stderr, "ERROR: specify --check to preflight whitelist targets")
+		fmt.Fprintln(os.Stderr, "ERROR: specify --check, list, add, or remove")
 		return app.ExitFatal
 	}
 	cfg, code := loadConfigOrFail(*cfgFlag)
@@ -278,10 +384,11 @@ func printUsage() {
 	fmt.Print(`git-backup - Whitelist-driven GitHub repository mirror backup CLI
 
 Usage:
+  git-backup serve [--config <path>] [--listen 127.0.0.1:8080]
   git-backup init [--repos <r1,r2>] [--root <dir>] [--config <path>] [--install-service]
   git-backup service <install|uninstall|status> [--config <path>] [--user] [--with-report] [--dry-run]
-  git-backup sync [--config <path>]
-  git-backup targets --check [--config <path>]
+  git-backup sync [--config <path>] [--repo <owner/repo>]
+  git-backup targets <--check | list | add <repo> | remove <repo>> [--config <path>]
   git-backup status [--config <path> | --root <dir>] [--failed] [--stale 168h] [--json]
   git-backup verify [owner/repo] [--config <path>] [--fsck] [--json]
   git-backup report --weekly [--config <path>]
