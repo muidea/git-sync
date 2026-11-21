@@ -213,7 +213,7 @@ func RunSyncWithOptions(ctx context.Context, cfg *config.Config, logger *slog.Lo
 					isolateConflictPath(cfg.Storage.RootDir, repLedger, conflictRec, destAbs, now, logger)
 				} else if _, destStat := os.Stat(destAbs); destStat == nil {
 					if !isSamePathCaseInsensitive(oldAbs, destAbs) {
-						isolateRawConflictDir(cfg.Storage.RootDir, destAbs, meta.FullName, now, logger)
+						isolateRawConflictDir(cfg.Storage.RootDir, destAbs, meta.FullName, "rename destination already exists", now, logger)
 					}
 				}
 				if mkErr := os.MkdirAll(filepath.Dir(destAbs), 0o755); mkErr != nil {
@@ -237,7 +237,7 @@ func RunSyncWithOptions(ctx context.Context, cfg *config.Config, logger *slog.Lo
 				if occupant := repLedger.FindByLocalPath(destRel); occupant != nil && occupant.ID != meta.ID {
 					isolateConflictPath(cfg.Storage.RootDir, repLedger, occupant, destAbs, now, logger)
 					isNewClone = true
-				} else if gitops.IsBareMirrorFor(ctx, destAbs, meta.FullName) {
+				} else if ok, reason := gitops.CheckBareMirrorFor(ctx, destAbs, meta.FullName); ok {
 					logger.Info("adopting existing bare repository into ledger", "repo", meta.FullName, "repo_id", meta.ID)
 					_ = gitops.SetRemoteURL(ctx, destAbs, cloneURL)
 					rec = &ledger.RepoRecord{
@@ -249,7 +249,7 @@ func RunSyncWithOptions(ctx context.Context, cfg *config.Config, logger *slog.Lo
 					}
 					repLedger.Repositories[key] = rec
 				} else {
-					isolateRawConflictDir(cfg.Storage.RootDir, destAbs, meta.FullName, now, logger)
+					isolateRawConflictDir(cfg.Storage.RootDir, destAbs, meta.FullName, reason, now, logger)
 					isNewClone = true
 				}
 			} else {
@@ -322,6 +322,11 @@ func RunSyncWithOptions(ctx context.Context, cfg *config.Config, logger *slog.Lo
 			rec.State = ledger.StatusFailed
 			rec.ConsecutiveFailures++
 			rec.LastError = redactor.Redact(oc.errMsg)
+			logger.Warn("repository sync failed",
+				"repo", rec.FullName,
+				"consecutive_failures", rec.ConsecutiveFailures,
+				"error", rec.LastError,
+			)
 			continue
 		}
 
@@ -871,15 +876,18 @@ func isolateConflictPath(rootDir string, repLedger *ledger.RepoLedger, occupant 
 	logger.Warn("isolated conflicting repo_id path to .trash", "old_repo", occupant.FullName, "old_id", occupant.ID, "trash_path", relTrash)
 }
 
-func isolateRawConflictDir(rootDir, destAbs, fullName string, now time.Time, logger *slog.Logger) {
+func isolateRawConflictDir(rootDir, destAbs, fullName, reason string, now time.Time, logger *slog.Logger) {
 	relTrash := filepath.ToSlash(filepath.Join(".trash", "conflict_"+now.Format("20060102_150405"), fullName+".git"))
 	dstTrash := filepath.Join(rootDir, filepath.FromSlash(relTrash))
 	if err := os.MkdirAll(filepath.Dir(dstTrash), 0o755); err != nil {
+		logger.Warn("mkdir for unknown directory isolation failed", "path", destAbs, "error", err)
 		return
 	}
-	if err := os.Rename(destAbs, dstTrash); err == nil {
-		logger.Warn("isolated unknown existing directory to .trash", "path", destAbs, "trash_path", relTrash)
+	if err := os.Rename(destAbs, dstTrash); err != nil {
+		logger.Warn("isolate unknown existing directory failed", "path", destAbs, "trash_path", relTrash, "error", err)
+		return
 	}
+	logger.Warn("isolated unknown existing directory to .trash", "path", destAbs, "trash_path", relTrash, "reason", reason)
 }
 
 func isSamePathCaseInsensitive(a, b string) bool {

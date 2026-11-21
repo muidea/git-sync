@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -82,5 +84,42 @@ func TestLedgerSaveLoadAndTrashCleanup(t *testing.T) {
 	}
 	if len(loaded.Repositories) != 1 || loaded.Repositories["200"].FullName != "muidea/keep" {
 		t.Fatalf("unexpected loaded ledger: %+v", loaded)
+	}
+}
+
+func TestEnsureDirSurfacesBrokenSymlinkAndFileErrors(t *testing.T) {
+	root := t.TempDir()
+
+	// Broken symlink must not be masked as "file exists" by os.MkdirAll.
+	broken := filepath.Join(root, "broken-link")
+	if err := os.Symlink(filepath.Join(root, "does-not-exist"), broken); err != nil {
+		t.Fatal(err)
+	}
+	err := ensureDir(broken)
+	if err == nil || errors.Is(err, os.ErrExist) || !strings.Contains(err.Error(), "non-directory") {
+		t.Fatalf("expected non-directory error for broken symlink, got %v", err)
+	}
+
+	// Regular file must return ENOTDIR.
+	filePath := filepath.Join(root, "regular-file")
+	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = ensureDir(filePath)
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("expected ENOTDIR for regular file, got %v", err)
+	}
+
+	// Valid symlink to directory must succeed.
+	realDir := filepath.Join(root, "real-dir")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	validLink := filepath.Join(root, "valid-link")
+	if err := os.Symlink(realDir, validLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDir(validLink); err != nil {
+		t.Fatalf("expected valid dir symlink to succeed, got %v", err)
 	}
 }

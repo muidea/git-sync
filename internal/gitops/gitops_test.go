@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,5 +143,52 @@ func TestEmptyRepoAndStaleLockCleanup(t *testing.T) {
 	removed, err := removeStaleLocksAndCheck(ctx, destDir)
 	if err != nil || removed != 1 {
 		t.Fatalf("expected 1 stale lock removed, got removed=%d err=%v", removed, err)
+	}
+}
+
+func TestCheckBareMirrorForAndURLNormalization(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"https://github.com/muidea/Repo.git", "https://github.com/muidea/repo"},
+		{"https://x-access-token:ghp_secret@github.com/muidea/Repo.git", "https://github.com/muidea/repo"},
+		{"http://github.com/muidea/Repo/", "https://github.com/muidea/repo"},
+		{"ssh://git@github.com/muidea/Repo.git", "https://github.com/muidea/repo"},
+		{"git://github.com/muidea/Repo.git", "https://github.com/muidea/repo"},
+		{"git@github.com:muidea/Repo.git", "https://github.com/muidea/repo"},
+	}
+	for _, tc := range cases {
+		if got := normalizeGitHubURL(tc.raw); got != tc.want {
+			t.Fatalf("normalizeGitHubURL(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+
+	root := t.TempDir()
+	bareDir := filepath.Join(root, "bare.git")
+	runGit(t, "", "init", "--bare", bareDir)
+	runGit(t, bareDir, "remote", "add", "origin", "https://x-access-token:ghp_topsecret@github.com/muidea/Adopt.git")
+
+	if ok, reason := CheckBareMirrorFor(ctx, bareDir, "muidea/adopt"); !ok {
+		t.Fatalf("expected CheckBareMirrorFor to adopt credentialed origin URL, reason=%s", reason)
+	}
+
+	runGit(t, bareDir, "remote", "set-url", "origin", "ssh://git@github.com/muidea/Adopt.git")
+	if ok, reason := CheckBareMirrorFor(ctx, bareDir, "muidea/adopt"); !ok {
+		t.Fatalf("expected CheckBareMirrorFor to adopt ssh:// origin URL, reason=%s", reason)
+	}
+
+	runGit(t, bareDir, "remote", "set-url", "origin", "https://x-access-token:ghp_topsecret@github.com/muidea/Other.git")
+	ok, reason := CheckBareMirrorFor(ctx, bareDir, "muidea/adopt")
+	if ok || !strings.Contains(reason, "mismatch") || strings.Contains(reason, "ghp_topsecret") {
+		t.Fatalf("unexpected mismatch result ok=%v reason=%q", ok, reason)
+	}
+
+	nonBare := filepath.Join(root, "nonbare")
+	runGit(t, "", "init", nonBare)
+	ok, reason = CheckBareMirrorFor(ctx, nonBare, "muidea/adopt")
+	if ok || !strings.Contains(reason, "not a bare repository") {
+		t.Fatalf("expected non-bare reason, got ok=%v reason=%q", ok, reason)
 	}
 }

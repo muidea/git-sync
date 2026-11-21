@@ -91,7 +91,7 @@ type FileLock struct {
 
 // AcquireLock opens rootDir/.backup.lock and acquires a non-blocking exclusive flock.
 func AcquireLock(rootDir string) (*FileLock, error) {
-	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+	if err := ensureDir(rootDir); err != nil {
 		return nil, fmt.Errorf("ensure root_dir %q: %w", rootDir, err)
 	}
 	lockPath := filepath.Join(rootDir, ".backup.lock")
@@ -198,7 +198,7 @@ func SaveSummary(rootDir string, s *StatusSummary) error {
 // WriteFileAtomic writes data to a sibling temp file, fsyncs it, and atomically renames over targetPath.
 func WriteFileAtomic(targetPath string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := ensureDir(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(targetPath)+".tmp-*")
@@ -273,9 +273,28 @@ type DiskInfo struct {
 	AvailPercent float64 `json:"avail_percent"`
 }
 
+// ensureDir verifies dir exists as a directory or creates it, surfacing real stat errors
+// (such as ESTALE, ENOTCONN, EIO, EACCES) instead of letting os.MkdirAll mask them with EEXIST.
+func ensureDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err == nil {
+		if info.IsDir() {
+			return nil
+		}
+		return &os.PathError{Op: "mkdir", Path: dir, Err: syscall.ENOTDIR}
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if linfo, lerr := os.Lstat(dir); lerr == nil && !linfo.IsDir() {
+		return fmt.Errorf("path %q exists as non-directory (%s)", dir, linfo.Mode().Type())
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
 // GetDiskInfo inspects the filesystem hosting rootDir.
 func GetDiskInfo(rootDir string) (DiskInfo, error) {
-	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+	if err := ensureDir(rootDir); err != nil {
 		return DiskInfo{}, fmt.Errorf("ensure root_dir %q: %w", rootDir, err)
 	}
 	var st syscall.Statfs_t

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,17 +166,29 @@ func SetRemoteURL(ctx context.Context, repoDir, newURL string) error {
 
 // IsBareMirrorFor validates an existing directory for cold-start adoption.
 func IsBareMirrorFor(ctx context.Context, repoDir, fullName string) bool {
+	ok, _ := CheckBareMirrorFor(ctx, repoDir, fullName)
+	return ok
+}
+
+// CheckBareMirrorFor validates an existing directory for cold-start adoption and returns a sanitized mismatch reason on failure.
+func CheckBareMirrorFor(ctx context.Context, repoDir, fullName string) (bool, string) {
 	out, err := runCmd(ctx, repoDir, nil, "git", "rev-parse", "--is-bare-repository")
-	if err != nil || strings.TrimSpace(out) != "true" {
-		return false
+	if err != nil {
+		return false, fmt.Sprintf("git rev-parse --is-bare-repository failed: %v", err)
+	}
+	if strings.TrimSpace(out) != "true" {
+		return false, fmt.Sprintf("not a bare repository (is-bare=%q)", strings.TrimSpace(out))
 	}
 	urlOut, err := runCmd(ctx, repoDir, nil, "git", "config", "--get", "remote.origin.url")
 	if err != nil {
-		return false
+		return false, fmt.Sprintf("read remote.origin.url failed: %v", err)
 	}
 	got := normalizeGitHubURL(urlOut)
 	expected := strings.ToLower("https://github.com/" + strings.TrimSuffix(fullName, ".git"))
-	return got == expected
+	if got != expected {
+		return false, fmt.Sprintf("remote.origin.url mismatch: got %q, want %q", got, expected)
+	}
+	return true, ""
 }
 
 // HeadCommit returns "EMPTY" for empty repos or the resolved HEAD commit SHA.
@@ -417,6 +430,10 @@ func cleanupTmpPacks(repoDir string) {
 }
 
 func runCmd(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
+	if name == "git" {
+		// Allow operating on bind-mounted / CIFS repositories whose UID differs from the container user.
+		args = append([]string{"-c", "safe.directory=*"}, args...)
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
@@ -459,10 +476,22 @@ func isLockFileError(msg string) bool {
 
 func normalizeGitHubURL(raw string) string {
 	s := strings.TrimSpace(raw)
-	s = strings.TrimSuffix(s, ".git")
-	if strings.HasPrefix(s, "git@github.com:") {
-		s = "https://github.com/" + strings.TrimPrefix(s, "git@github.com:")
+	if s == "" {
+		return ""
 	}
+	if strings.HasPrefix(strings.ToLower(s), "git@github.com:") {
+		s = "https://github.com/" + s[len("git@github.com:"):]
+	} else if u, err := url.Parse(s); err == nil && strings.EqualFold(u.Hostname(), "github.com") {
+		u.Scheme = "https"
+		u.User = nil
+		u.Host = "github.com"
+		u.RawQuery = ""
+		u.Fragment = ""
+		s = u.String()
+	}
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
 	return strings.ToLower(s)
 }
 
