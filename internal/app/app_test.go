@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -308,5 +309,35 @@ observability:
 	}
 	if webhookEvents[len(webhookEvents)-1]["event_type"] != "weekly_report" {
 		t.Fatalf("expected weekly_report webhook event, got %+v", webhookEvents[len(webhookEvents)-1])
+	}
+}
+
+func TestIsRetryableGitError(t *testing.T) {
+	retryable := []error{
+		context.DeadlineExceeded,
+		errors.New("git clone --mirror: exit status 128: fatal: unable to access 'https://github.com/muidea/magicOrm.git/': Failed to connect to github.com port 443 after 134899 ms: Could not connect to server"),
+		errors.New("git clone --mirror: exit status 128: fatal: unable to access 'https://github.com/muidea/magicRunner.git/': Operation too slow. Less than 1000 bytes/sec transferred the last 60 seconds"),
+		errors.New("git clone --mirror: exit status 128: fatal: unable to access 'https://github.com/muidea/BytesAnalyser.git/': OpenSSL SSL_read: OpenSSL/3.3.7: error:0A000126:SSL routines::unexpected eof while reading, errno 0"),
+		errors.New("git clone --mirror: exit status 128: fatal: early EOF"),
+		errors.New("error: RPC failed; curl 18 transfer closed with outstanding read data remaining"),
+		errors.New("fatal: unable to access 'https://github.com/a/b.git/': Connection timed out after 300027 milliseconds"),
+	}
+	for _, err := range retryable {
+		if !isRetryableGitError(err) {
+			t.Fatalf("expected error to be retryable: %v", err)
+		}
+	}
+
+	nonRetryable := []error{
+		nil,
+		errors.New("repository requires Git LFS, but git-lfs binary is not installed on host"),
+		errors.New("fatal: Authentication failed for 'https://github.com/a/b.git/'"),
+		errors.New("remote: Repository not found."),
+		errors.New("fatal: could not read Username for 'https://github.com': terminal prompts disabled"),
+	}
+	for _, err := range nonRetryable {
+		if isRetryableGitError(err) {
+			t.Fatalf("expected error to be non-retryable: %v", err)
+		}
 	}
 }

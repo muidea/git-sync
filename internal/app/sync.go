@@ -812,6 +812,7 @@ func executeSyncTask(
 				}
 			}
 		}
+		attemptTimedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 		cancel()
 
 		if err == nil {
@@ -837,7 +838,7 @@ func executeSyncTask(
 		}
 
 		lastErr = err
-		if attempt < cfg.Sync.MaxRetries && isRetryableGitError(err) {
+		if attempt < cfg.Sync.MaxRetries && (attemptTimedOut || isRetryableGitError(err)) {
 			wait := gitRetryBackoff(attempt + 1)
 			logger.Warn("retrying git sync after transient error",
 				"repo", task.meta.FullName,
@@ -904,12 +905,18 @@ func isRetryableGitError(err error) bool {
 	low := strings.ToLower(err.Error())
 	if strings.Contains(low, "git-lfs binary is not installed") ||
 		strings.Contains(low, "authentication failed") ||
-		strings.Contains(low, "repository not found") {
+		strings.Contains(low, "repository not found") ||
+		strings.Contains(low, "permission denied") ||
+		strings.Contains(low, "could not read username") {
 		return false
 	}
 	for _, needle := range []string{
-		"timed out", "timeout", "connection reset", "tls", "gnutls",
-		"502", "503", "504", "rpc failed", "unexpected disconnect", "could not resolve host",
+		"timed out", "timeout", "failed to connect", "could not connect to server",
+		"connection refused", "connection reset", "operation too slow",
+		"ssl_read", "unexpected eof", "early eof", "recv failure", "empty reply from server",
+		"tls", "gnutls", "stream error", "http2",
+		"502", "503", "504", "rpc failed", "unexpected disconnect",
+		"could not resolve host", "unable to look up", "network is unreachable",
 	} {
 		if strings.Contains(low, needle) {
 			return true
